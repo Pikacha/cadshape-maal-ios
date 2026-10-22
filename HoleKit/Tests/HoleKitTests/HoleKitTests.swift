@@ -94,7 +94,7 @@ final class HoleKitTests: XCTestCase {
         let clean = scene.picture(noise: 0)
         let truth = clean.pixels.reduce(0.0) { $0 + (205 - Double($1)) / (205 - 45) }
         let area = abs(polygonArea(hole.outline))
-        XCTAssertEqual(area, truth, accuracy: truth * 0.02)
+        XCTAssertEqual(area, truth, accuracy: truth * 0.01)
         XCTAssertGreaterThan(hole.contrast, 100)
     }
 
@@ -135,12 +135,12 @@ final class HoleKitTests: XCTestCase {
 
     func testMeasuresHoleStraightOn() {
         let scene = Scene(tiltDegrees: 0, distance: 0.7, radius: 0.04)
-        check(scene, source: .picture, tolerance: 0.015)
+        check(scene, source: .picture, tolerance: 0.01)
     }
 
     func testMeasuresHoleOnTiltedWall() {
         let scene = Scene(tiltDegrees: 35, distance: 0.9, radius: 0.035)
-        check(scene, source: .picture, tolerance: 0.02)
+        check(scene, source: .picture, tolerance: 0.015)
     }
 
     func testMeasuresFromRaycastSurfaceWithoutLidar() {
