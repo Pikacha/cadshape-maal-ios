@@ -50,7 +50,7 @@ Du kan ha inntil 3 slike apper samtidig.
 | `HoleKit/` | Målematematikken uten Apple-UI: hullfinner, LiDAR-plan (RANSAC + minste kvadrater), stråle → plan → mm, sirkeltilpasning. Testes med `swift test`. |
 | `CadshapeMaal/` | SwiftUI-appen: ARKit (kamera, LiDAR, linse), QR-tilkobling, tegning over kamerabildet, kontakt med CadSHAPE. |
 | `project.yml` | Xcode-prosjektet (XcodeGen). |
-| `.github/workflows/build.yml` (kopi i `ci/`) | Bygger på en Mac hos GitHub: tester HoleKit, bygger usignert IPA og legger den på release «latest». |
+| `.github/workflows/build.yml` | Bygger på en Mac hos GitHub: tester HoleKit, bygger usignert IPA og legger den på release «latest». |
 
 Bygge selv på en Mac: `brew install xcodegen && xcodegen generate && open CadshapeMaal.xcodeproj`.
 
