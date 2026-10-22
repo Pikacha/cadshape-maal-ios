@@ -24,7 +24,8 @@ Apple-ID-en og passordet ditt skrives bare inn i Sideloadly/SideStore – aldri 
 2. **Sideloadly** på PC-en (sideloadly.io). På Windows trenger den iTunes og iCloud fra
    Apples nettside (ikke Microsoft Store-versjonene) – Sideloadly sier fra hvis noe mangler.
 3. Koble iPhone til PC-en med kabel og trykk «Stol på» på telefonen.
-4. Dra IPA-filen inn i Sideloadly, skriv inn Apple-ID-en din og trykk **Start**.
+4. Dra IPA-filen inn i Sideloadly, skriv inn Apple-ID-en din og trykk **Start**. Klager den på
+   «bundle ID», slå på *Change bundle ID* under *Advanced options* og prøv igjen.
 5. På iPhone:
    - **Innstillinger → Personvern og sikkerhet → Utviklermodus → på** (telefonen starter på nytt).
    - **Innstillinger → Generelt → VPN og enhetsadministrasjon →** din Apple-ID → **Stol på**.
