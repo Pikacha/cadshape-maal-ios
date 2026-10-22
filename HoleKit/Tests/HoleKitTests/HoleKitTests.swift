@@ -90,10 +90,11 @@ final class HoleKitTests: XCTestCase {
         let scene = Scene(tiltDegrees: 0, distance: 0.8, radius: 0.04)
         let g = scene.picture().blurred()
         guard let hole = findHole(g, seed: scene.seed) else { return XCTFail("no hole") }
-        // Radius in half-size pixels: f · r / z / 2.
-        let r = 520 * 0.04 / 0.8 / 2
+        // The true area in half-size pixels: how much of each pixel the hole covers (noise-free picture).
+        let clean = scene.picture(noise: 0)
+        let truth = clean.pixels.reduce(0.0) { $0 + (205 - Double($1)) / (205 - 45) }
         let area = abs(polygonArea(hole.outline))
-        XCTAssertEqual(area, Double.pi * r * r, accuracy: Double.pi * r * r * 0.03)
+        XCTAssertEqual(area, truth, accuracy: truth * 0.02)
         XCTAssertGreaterThan(hole.contrast, 100)
     }
 
