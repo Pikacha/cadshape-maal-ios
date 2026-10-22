@@ -1,0 +1,11 @@
+# Made by XcodeGen and Xcode
+CadshapeMaal.xcodeproj/
+CadshapeMaal/Info.plist
+build/
+.build/
+.swiftpm/
+DerivedData/
+Payload/
+*.ipa
+xcuserdata/
+.DS_Store

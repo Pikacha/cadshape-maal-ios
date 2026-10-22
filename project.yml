@@ -1,0 +1,57 @@
+# XcodeGen: `xcodegen generate` makes CadshapeMaal.xcodeproj (not kept in git).
+name: CadshapeMaal
+options:
+  bundleIdPrefix: no.cadshape
+  deploymentTarget:
+    iOS: "17.0"
+  createIntermediateGroups: true
+packages:
+  HoleKit:
+    path: HoleKit
+settings:
+  base:
+    SWIFT_VERSION: "5.0"
+    MARKETING_VERSION: "1.0"
+    CURRENT_PROJECT_VERSION: "1"
+    DEVELOPMENT_TEAM: ""
+targets:
+  CadshapeMaal:
+    type: application
+    platform: iOS
+    sources:
+      - path: CadshapeMaal
+    dependencies:
+      - package: HoleKit
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: no.cadshape.maal
+        PRODUCT_NAME: CadshapeMaal
+        TARGETED_DEVICE_FAMILY: "1"
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        CODE_SIGN_STYLE: Manual
+        CODE_SIGNING_ALLOWED: "NO"
+        CODE_SIGNING_REQUIRED: "NO"
+        CODE_SIGN_IDENTITY: ""
+    info:
+      path: CadshapeMaal/Info.plist
+      properties:
+        CFBundleDisplayName: CadSHAPE Mål
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        LSRequiresIPhoneOS: true
+        UILaunchScreen: {}
+        UIRequiredDeviceCapabilities: [arkit]
+        UISupportedInterfaceOrientations: [UIInterfaceOrientationPortrait]
+        UIStatusBarStyle: UIStatusBarStyleLightContent
+        UIApplicationSceneManifest:
+          UIApplicationSupportsMultipleScenes: false
+        NSCameraUsageDescription: Kameraet og LiDAR brukes til å finne og måle hullet.
+        NSLocalNetworkUsageDescription: Appen sender målene til CadSHAPE på PC-en din i samme nettverk.
+        NSAppTransportSecurity:
+          NSAllowsArbitraryLoads: true
+          NSAllowsLocalNetworking: true
+schemes:
+  CadshapeMaal:
+    build:
+      targets:
+        CadshapeMaal: all
