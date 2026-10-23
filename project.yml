@@ -32,6 +32,19 @@ targets:
         CODE_SIGNING_ALLOWED: "NO"
         CODE_SIGNING_REQUIRED: "NO"
         CODE_SIGN_IDENTITY: ""
+        # The script below writes into the app bundle.
+        ENABLE_USER_SCRIPT_SANDBOXING: "NO"
+    # Ad-hoc signature: an unsigned binary has no LC_CODE_SIGNATURE, and iOS then rejects the
+    # signature Sideloadly adds (ApplicationVerificationFailed 0xe8008001). Sideloadly re-signs
+    # with the user's own Apple ID.
+    postBuildScripts:
+      - name: Ad-hoc sign
+        basedOnDependencyAnalysis: false
+        script: |
+          if [ "$PLATFORM_NAME" = "iphoneos" ]; then
+            /usr/bin/codesign --force --sign - --timestamp=none --generate-entitlement-der "$TARGET_BUILD_DIR/$WRAPPER_NAME"
+            /usr/bin/codesign --verify --verbose "$TARGET_BUILD_DIR/$WRAPPER_NAME"
+          fi
     info:
       path: CadshapeMaal/Info.plist
       properties:
