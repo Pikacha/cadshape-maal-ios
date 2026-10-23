@@ -10,7 +10,11 @@ struct ContentView: View {
 
     var body: some View {
         ZStack {
-            ARMeasureView(model: model).ignoresSafeArea()
+            if model.isDemo {
+                DemoCameraView(model: model).ignoresSafeArea()
+            } else {
+                ARMeasureView(model: model).ignoresSafeArea()
+            }
             OverlayView(model: model).ignoresSafeArea().allowsHitTesting(false)
             VStack(spacing: 12) {
                 TopBar(model: model)
@@ -119,12 +123,14 @@ struct TopBar: View {
     }
 
     private var dot: Color {
+        if model.isDemo { return accent }
         if model.pairing == nil { return .gray }
         if model.pcOpen == true { return good }
         return model.connectionError == nil ? .yellow : .red
     }
 
     private var status: String {
+        if model.isDemo { return "Demo – uten kamera og PC" }
         guard let p = model.pairing else { return "Ikke koblet til PC" }
         if model.pcOpen == true { return "CadSHAPE · \(p.hostLabel)" }
         if model.pcOpen == false { return "CadSHAPE er ikke åpent" }

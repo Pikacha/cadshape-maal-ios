@@ -1,0 +1,64 @@
+# Runs the app in the iPhone simulator in demo mode (a made-up ceiling with a hole, no camera
+# and no PC) and saves screenshots of each step as the artifact «skjermbilder».
+name: Skjermbilder (simulator)
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: screenshots
+  cancel-in-progress: true
+
+jobs:
+  screenshots:
+    runs-on: macos-15
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Make the Xcode project
+        run: |
+          brew install xcodegen
+          xcodegen generate
+
+      - name: Build for the simulator
+        run: |
+          set -o pipefail
+          xcodebuild \
+            -project CadshapeMaal.xcodeproj \
+            -scheme CadshapeMaal \
+            -configuration Release \
+            -sdk iphonesimulator \
+            -destination 'generic/platform=iOS Simulator' \
+            -derivedDataPath build-sim \
+            CODE_SIGNING_ALLOWED=YES CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY=- \
+            -quiet build
+
+      - name: Take screenshots
+        run: |
+          set -e
+          xcrun simctl list devices available
+          UDID=$(xcrun simctl list devices available | grep -E "iPhone 1[5-9] Pro \(" | head -1 | grep -oE "[0-9A-F]{8}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{12}")
+          echo "Simulator: $UDID"
+          xcrun simctl boot "$UDID" || true
+          xcrun simctl bootstatus "$UDID" -b
+          xcrun simctl ui "$UDID" appearance dark || true
+          xcrun simctl status_bar "$UDID" override --time "09:41" --batteryState charged --batteryLevel 100 --wifiBars 3 --cellularBars 4 || true
+          xcrun simctl install "$UDID" build-sim/Build/Products/Release-iphonesimulator/CadshapeMaal.app
+          mkdir -p skjermbilder
+          for step in pairing live locked done settings; do
+            xcrun simctl launch --terminate-running-process "$UDID" no.cadshape.maal -demo "$step"
+            sleep 9
+            xcrun simctl io "$UDID" screenshot "skjermbilder/$step.png"
+          done
+          ls -la skjermbilder
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: skjermbilder
+          path: skjermbilder

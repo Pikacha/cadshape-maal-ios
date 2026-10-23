@@ -49,7 +49,16 @@ final class MeasureModel: ObservableObject {
     private var previewWork: DispatchWorkItem?
     private let haptic = UINotificationFeedbackGenerator()
 
+    /// Demo (simulator screenshots, `-demo live`): a made-up ceiling instead of the camera, no PC.
+    let demo: String? = UserDefaults.standard.string(forKey: "demo")
+    var isDemo: Bool { demo != nil }
+
     init() {
+        if demo != nil {
+            hasLidar = true
+            wantsPairing = demo == "pairing"
+            return
+        }
         if let p = Pairing.load() { connect(p) } else { wantsPairing = true }
         statusTimer = Timer.scheduledTimer(withTimeInterval: 4, repeats: true) { [weak self] _ in self?.checkPc() }
     }
@@ -107,7 +116,7 @@ final class MeasureModel: ObservableObject {
         }
     }
 
-    var connected: Bool { pcOpen == true }
+    var connected: Bool { isDemo || pcOpen == true }
 
     // MARK: Live measuring
 
@@ -174,6 +183,11 @@ final class MeasureModel: ObservableObject {
     }
 
     private func sendLive() {
+        if isDemo, let rep = representative() {
+            let s = localShape(rep.outlineMM)
+            answer = ShapeAnswer(shape: s, text: s.text, label: s.kind.label)
+            return
+        }
         guard let client, connected, !sending, Date().timeIntervalSince(lastSent) > 0.35, let rep = representative() else { return }
         sending = true
         lastSent = Date()
@@ -201,8 +215,14 @@ final class MeasureModel: ObservableObject {
     }
 
     private func fitLocked() {
+        if isDemo {
+            let s = localShape(lockedOutline)
+            shape = s
+            answer = ShapeAnswer(shape: s, text: s.text, label: s.kind.label)
+            return
+        }
         guard let client else {
-            shape = localShape()
+            shape = localShape(lockedOutline)
             error = "Ikke koblet til PC-en – formen er grovt anslått. Koble til for å lage delen."
             return
         }
@@ -216,19 +236,19 @@ final class MeasureModel: ObservableObject {
                 self.answer = a
                 self.error = nil
             case .failure(let e):
-                self.shape = self.localShape()
+                self.shape = self.localShape(self.lockedOutline)
                 self.error = e.message
             }
         }
     }
 
     /// Without the PC: a circle when the outline is round, else the outer size.
-    private func localShape() -> MeasuredShape {
-        if let c = fitCircle(lockedOutline), c.rms < c.radius * 0.025, forcedKind != .rect, forcedKind != .free {
+    private func localShape(_ outline: [P2]) -> MeasuredShape {
+        if let c = fitCircle(outline), c.rms < c.radius * 0.025, forcedKind != .rect, forcedKind != .free {
             return .circle(d: 2 * c.radius)
         }
         var lo = P2(Double.infinity, Double.infinity), hi = P2(-Double.infinity, -Double.infinity)
-        for p in lockedOutline {
+        for p in outline {
             lo = P2(min(lo.x, p.x), min(lo.y, p.y))
             hi = P2(max(hi.x, p.x), max(hi.y, p.y))
         }
@@ -262,6 +282,10 @@ final class MeasureModel: ObservableObject {
     }
 
     func commit() {
+        if isDemo {
+            done = "\(make.label) er laget i CadSHAPE (demo)."
+            return
+        }
         guard let client, let shape else { return }
         working = true
         error = nil
