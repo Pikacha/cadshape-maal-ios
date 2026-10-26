@@ -344,8 +344,14 @@ public struct ObjectFit {
     public var midHeight: Double
     /// Middle of the footprint on the table (world, m).
     public var centre: V3
+    /// The outline's x (camera right, flattened) and y (away) directions and the table's up (world).
+    public var xAxis: V3
+    public var yAxis: V3
+    public var up: V3
     /// LiDAR points within reach (60 cm across).
     public var points: Int
+    /// True when the edge was sharpened with the camera picture (`refineOutline`).
+    public var sharpened = false
 }
 
 /// Something lying on a table: the table is the most common level below the cross-hair, the
@@ -473,6 +479,9 @@ public func fitObject(_ points: [V3], aim: V3, up: V3 = V3(0, 1, 0), right: V3? 
         height: r1(quantile(hs, 0.85) * 1000),
         midHeight: r1(median(hs) * 1000),
         centre: toWorld(mx, my),
+        xAxis: ux,
+        yAxis: uy,
+        up: F.up,
         points: usable
     )
 }
@@ -664,3 +673,340 @@ public func loopArea(_ pts: [P2]) -> Double {
     }
     return abs(a) / 2
 }
+
+// MARK: A pipe or rod
+
+public struct CylinderFit {
+    /// Outside diameter (mm).
+    public var diameter: Double
+    /// The axis direction and a point on it near the cross-hair (world).
+    public var axis: V3
+    public var centre: V3
+    /// Median distance of the points from the fitted surface (mm).
+    public var residual: Double
+    public var points: Int
+}
+
+/// Circle through 2D points: algebraic (Kåsa) start, then a few geometric (Gauss–Newton) steps.
+public func circleFitGeometric(_ pts: [P2]) -> (cx: Double, cy: Double, r: Double)? {
+    let n = Double(pts.count)
+    if pts.count < 5 { return nil }
+    var mx = 0.0, my = 0.0
+    for p in pts {
+        mx += p.x
+        my += p.y
+    }
+    mx /= n
+    my /= n
+    var suu = 0.0, suv = 0.0, svv = 0.0, suuu = 0.0, svvv = 0.0, suvv = 0.0, svuu = 0.0
+    for p in pts {
+        let u = p.x - mx, v = p.y - my
+        suu += u * u
+        suv += u * v
+        svv += v * v
+        suuu += u * u * u
+        svvv += v * v * v
+        suvv += u * v * v
+        svuu += v * u * u
+    }
+    let det = suu * svv - suv * suv
+    if abs(det) < 1e-18 { return nil }
+    let a = (suuu + suvv) / 2, b = (svvv + svuu) / 2
+    var cu = (a * svv - b * suv) / det
+    var cv = (b * suu - a * suv) / det
+    var r = (cu * cu + cv * cv + (suu + svv) / n).squareRoot()
+    // Geometric refinement: minimise Σ (|p − c| − r)².
+    for _ in 0..<8 {
+        var m = [[Double]](repeating: [0, 0, 0], count: 3)
+        var g = [0.0, 0.0, 0.0]
+        for p in pts {
+            let dx = p.x - mx - cu, dy = p.y - my - cv
+            let d = max(1e-12, (dx * dx + dy * dy).squareRoot())
+            let e = d - r
+            let row = [-dx / d, -dy / d, -1.0]
+            for i in 0..<3 {
+                g[i] += row[i] * e
+                for j in 0..<3 { m[i][j] += row[i] * row[j] }
+            }
+        }
+        guard let step = solve3(m, g.map { -$0 }) else { break }
+        cu += step[0]
+        cv += step[1]
+        r += step[2]
+        if abs(step[0]) + abs(step[1]) + abs(step[2]) < 1e-9 { break }
+    }
+    return r > 0 && r.isFinite ? (cu + mx, cv + my, r) : nil
+}
+
+/// The points joined to the one nearest `aim` (4 mm cells, neighbours touching): a wall or table
+/// behind the pipe is left out when there is a gap to it.
+public func connectedNear(_ pts: [V3], aim: V3, cell: Double = 0.004) -> [V3] {
+    if pts.isEmpty { return pts }
+    struct Key: Hashable { var x: Int; var y: Int; var z: Int }
+    func key(_ p: V3) -> Key { Key(x: Int((p.x / cell).rounded(.down)), y: Int((p.y / cell).rounded(.down)), z: Int((p.z / cell).rounded(.down))) }
+    var cells: [Key: [Int]] = [:]
+    for (i, p) in pts.enumerated() { cells[key(p), default: []].append(i) }
+    var start = 0
+    var bd = Double.infinity
+    for (i, p) in pts.enumerated() {
+        let d = vlength(p - aim)
+        if d < bd {
+            bd = d
+            start = i
+        }
+    }
+    let k0 = key(pts[start])
+    var seen: Set<Key> = [k0]
+    var stack = [k0]
+    var out: [V3] = []
+    while let k = stack.popLast() {
+        for i in cells[k] ?? [] { out.append(pts[i]) }
+        for dx in -1...1 {
+            for dy in -1...1 {
+                for dz in -1...1 {
+                    let nk = Key(x: k.x + dx, y: k.y + dy, z: k.z + dz)
+                    if !seen.contains(nk) && cells[nk] != nil {
+                        seen.insert(nk)
+                        stack.append(nk)
+                    }
+                }
+            }
+        }
+    }
+    return out
+}
+
+/// A pipe, rod or hose seen from the side: the LiDAR points within `reach` of the cross-hair (and
+/// joined to it), the axis direction where they fall on one circle best (tried over the half
+/// sphere, then finer), and that circle's diameter. Stray points are dropped and the circle fitted again.
+public func fitCylinder(_ points: [V3], aim: V3, reach: Double = 0.05) -> CylinderFit? {
+    var near = connectedNear(points.filter { vlength($0 - aim) < reach }, aim: aim)
+    if near.count < 60 { return nil }
+    if near.count > 1500 {
+        let step = Double(near.count) / 1500
+        near = (0..<1500).map { near[Int(Double($0) * step)] }
+    }
+    func basis(_ axis: V3) -> (V3, V3) {
+        let seed = abs(axis.x) < 0.9 ? V3(1, 0, 0) : V3(0, 1, 0)
+        let e1 = vnormalized(vcross(seed, axis))
+        return (e1, vcross(axis, e1))
+    }
+    func flat(_ axis: V3, _ pts: [V3]) -> [P2] {
+        let (e1, e2) = basis(axis)
+        return pts.map { P2(vdot($0, e1), vdot($0, e2)) }
+    }
+    func score(_ axis: V3, _ pts: [V3]) -> (c: (cx: Double, cy: Double, r: Double), res: Double)? {
+        let f = flat(axis, pts)
+        guard let c = circleFitGeometric(f), c.r >= 0.0015, c.r <= 0.2 else { return nil }
+        let res = median(f.map { abs(((($0.x - c.cx) * ($0.x - c.cx) + ($0.y - c.cy) * ($0.y - c.cy)).squareRoot()) - c.r) })
+        return (c, res)
+    }
+    var best: (axis: V3, res: Double)? = nil
+    let N = 500
+    for i in 0..<N {
+        let z = 1 - (Double(i) + 0.5) / Double(N)
+        let rr = (1 - z * z).squareRoot()
+        let t = Double(i) * 2.399963229728653
+        let axis = V3(rr * cos(t), z, rr * sin(t))
+        if let sc = score(axis, near), best == nil || sc.res < best!.res { best = (axis, sc.res) }
+    }
+    guard var found = best else { return nil }
+    for span in [0.08, 0.02] {
+        let base = found.axis
+        let (p1, p2) = basis(base)
+        for i in -4...4 {
+            for j in -4...4 {
+                let axis = vnormalized(base + p1 * (Double(i) / 4 * span) + p2 * (Double(j) / 4 * span))
+                if let sc = score(axis, near), sc.res < found.res { found = (axis, sc.res) }
+            }
+        }
+    }
+    // Drop what is off the surface, fit again.
+    let axis = found.axis
+    var pts = near
+    var fit = score(axis, pts)
+    for _ in 0..<2 {
+        guard let current = fit else { break }
+        let f = flat(axis, pts)
+        let keep = max(0.002, 3 * current.res)
+        var kept: [V3] = []
+        for (i, q) in f.enumerated() where abs(((q.x - current.c.cx) * (q.x - current.c.cx) + (q.y - current.c.cy) * (q.y - current.c.cy)).squareRoot() - current.c.r) < keep {
+            kept.append(pts[i])
+        }
+        if kept.count < 30 { break }
+        pts = kept
+        fit = score(axis, pts)
+    }
+    guard let done = fit else { return nil }
+    let (e1, e2) = basis(axis)
+    let centre = e1 * done.c.cx + e2 * done.c.cy + axis * vdot(aim, axis)
+    return CylinderFit(diameter: r1(done.c.r * 2000), axis: axis, centre: centre, residual: r1(done.res * 1000), points: pts.count)
+}
+
+// MARK: Two surfaces
+
+/// The surface round a point (LiDAR points within `reach`), for measuring a gap.
+public func surfaceNear(_ points: [V3], at p: V3, reach: Double = 0.03) -> (plane: Plane, point: V3)? {
+    let near = points.filter { vlength($0 - p) < reach }
+    guard let fit = fitPlane(near, threshold: 0.004), fit.inliers >= 20 else { return nil }
+    // The plane through the aimed point's foot.
+    let q = p - fit.plane.normal * (vdot(fit.plane.normal, p) - fit.plane.offset)
+    return (fit.plane, q)
+}
+
+/// The gap between two surfaces (mm, from the second point straight to the first surface) and the
+/// angle between them (degrees, 0 = parallel).
+public func gapBetween(_ a: (plane: Plane, point: V3), _ b: (plane: Plane, point: V3)) -> (gapMM: Double, angle: Double) {
+    let gap = abs(vdot(a.plane.normal, b.point) - a.plane.offset) * 1000
+    let c = min(1, abs(vdot(a.plane.normal, b.plane.normal)))
+    return (r1(gap), r1(acos(c) * 180 / .pi))
+}
+
+// MARK: A sharper edge from the camera picture
+
+/// A world point to full-picture pixels (nil behind the camera).
+public func project(_ p: V3, intrinsics K: Intrinsics, pose: CameraPose) -> P2? {
+    let d = p - pose.position
+    let cx = vdot(d, pose.x), cy = -vdot(d, pose.y), cz = -vdot(d, pose.z)
+    if cz <= 1e-6 { return nil }
+    return P2(K.fx * cx / cz + K.cx, K.fy * cy / cz + K.cy)
+}
+
+/// A full-picture pixel's ray where it meets the level `h` above `base` along `up` (world).
+public func rayToLevel(_ u: Double, _ v: Double, intrinsics K: Intrinsics, pose: CameraPose, base: V3, up: V3, h: Double) -> V3? {
+    let rc = K.ray(u, v)
+    let dir = pose.x * rc.x - pose.y * rc.y - pose.z * rc.z
+    let denom = vdot(dir, up)
+    if abs(denom) < 1e-9 { return nil }
+    let t = (vdot(base, up) + h - vdot(pose.position, up)) / denom
+    if t <= 0 { return nil }
+    return pose.position + dir * t
+}
+
+private func sampleGray(_ g: GrayImage, _ x: Double, _ y: Double) -> Double {
+    let fx = x - 0.5, fy = y - 0.5
+    let i = Int(fx.rounded(.down)), j = Int(fy.rounded(.down))
+    if i < 0 || j < 0 || i + 1 >= g.width || j + 1 >= g.height { return .nan }
+    let a = fx - Double(i), b = fy - Double(j)
+    let k = j * g.width + i
+    let p = g.pixels
+    let top = (1 - a) * Double(p[k]) + a * Double(p[k + 1])
+    let bottom = (1 - a) * Double(p[k + g.width]) + a * Double(p[k + g.width + 1])
+    return (1 - b) * top + b * bottom
+}
+
+/// The LiDAR footprint is good to a couple of mm; the camera picture has the edge to a fraction of
+/// a mm. For each point round the outline: look across the edge in the picture (between where the
+/// table-level and the top-level outline land), take the strongest brightness step, and lay it back
+/// on the table – at table level where the side faces the camera (its bottom edge is what shows),
+/// at the top where it faces away. Points without a clear step keep the LiDAR edge (a running
+/// median along the loop smooths single wrong steps). Nil when too little of the edge was found.
+/// `scale`: full-picture pixels per pixel of `gray`.
+public func refineOutline(_ fit: ObjectFit, gray g: GrayImage, scale: Double, intrinsics K: Intrinsics, pose: CameraPose) -> ObjectFit? {
+    let H = fit.height / 1000
+    func toWorld(_ x: Double, _ y: Double) -> V3 { fit.centre + fit.xAxis * (x / 1000) + fit.yAxis * (y / 1000) }
+    // Even points every ~1,5 mm round the loop.
+    let loop = fit.outline
+    var even: [P2] = []
+    for i in 0..<loop.count {
+        let a = loop[i], b = loop[(i + 1) % loop.count]
+        let n = max(1, Int((vlen2(b - a) / 1.5).rounded(.up)))
+        for k in 0..<n { even.append(a + (b - a) * (Double(k) / Double(n))) }
+    }
+    let n = even.count
+    if n < 12 { return nil }
+    // Smooth the LiDAR edge's small zigzags first (its normals would point every which way).
+    for _ in 0..<3 {
+        let prev = even
+        for i in 0..<n {
+            var sum = P2(0, 0)
+            for k in -2...2 { sum += prev[(i + k + n) % n] }
+            even[i] = sum / 5
+        }
+    }
+    var mid = P2(0, 0)
+    for p in even { mid += p / Double(n) }
+    func px(_ p: V3) -> P2? { project(p, intrinsics: K, pose: pose).map { $0 / scale } }
+    var shifts = [Double?](repeating: nil, count: n)
+    var outward = [P2](repeating: P2(0, 0), count: n)
+    for i in 0..<n {
+        let p = even[i]
+        let prev = even[(i - 3 + n) % n], next = even[(i + 3) % n]
+        var nrm = P2(next.y - prev.y, -(next.x - prev.x))
+        nrm /= max(1e-12, vlen2(nrm))
+        if vdot2(nrm, p - mid) < 0 { nrm = -nrm }
+        outward[i] = nrm
+        // The search line in the picture: ±4 mm across the edge, at the table and at the top.
+        var ends: [P2] = []
+        for d in [-4.0, 4.0] {
+            for h in [0.0, H] {
+                if let q = px(toWorld(p.x + nrm.x * d, p.y + nrm.y * d) + fit.up * h) { ends.append(q) }
+            }
+        }
+        if ends.count < 4 { continue }
+        let i0 = ends[0], t0 = ends[1], i1 = ends[2], t1 = ends[3]
+        let dir = ((i1 + t1) - (i0 + t0)) / 2
+        let len = vlen2(dir)
+        if len < 2 { continue }
+        let u = dir / len
+        func along(_ q: P2) -> Double { vdot2(q - i0, u) }
+        let s0 = min(along(i0), along(t0)) - 2
+        let s1 = max(along(i1), along(t1)) + 2
+        let step = 0.5
+        var vals: [Double] = []
+        var s = s0
+        while s <= s1 {
+            let q = i0 + u * s
+            vals.append(sampleGray(g, q.x, q.y))
+            s += step
+        }
+        var bestS = Double.nan
+        var bestG = 0.0
+        if vals.count >= 3 {
+            for k in 1..<(vals.count - 1) {
+                let grad = abs(vals[k + 1] - vals[k - 1]) / (2 * step)
+                if grad.isFinite && grad > bestG {
+                    bestG = grad
+                    // Parabola through the neighbouring gradients for a sub-pixel peak.
+                    let gm = k >= 2 ? abs(vals[k] - vals[k - 2]) / (2 * step) : grad
+                    let gp = k + 2 < vals.count ? abs(vals[k + 2] - vals[k]) / (2 * step) : grad
+                    let den = gm - 2 * grad + gp
+                    let off = abs(den) > 1e-9 ? max(-0.5, min(0.5, 0.5 * (gm - gp) / den)) : 0
+                    bestS = s0 + (Double(k) + off) * step
+                }
+            }
+        }
+        if !(bestG >= 6) || !bestS.isFinite { continue }
+        let pix = (i0 + u * bestS) * scale
+        // Which edge the picture shows: a side facing the camera is seen down to the table (the bottom
+        // edge), a side facing away only to its top edge.
+        let at = toWorld(p.x, p.y)
+        let nWorld = fit.xAxis * nrm.x + fit.yAxis * nrm.y
+        let level = vdot(nWorld, pose.position - at) > 0 ? 0 : H
+        guard let w = rayToLevel(pix.x, pix.y, intrinsics: K, pose: pose, base: fit.centre, up: fit.up, h: level) else { continue }
+        let d = w - fit.centre
+        let shift = (vdot(d, fit.xAxis) * 1000 - p.x) * nrm.x + (vdot(d, fit.yAxis) * 1000 - p.y) * nrm.y
+        if abs(shift) <= 4 { shifts[i] = shift }
+    }
+    let found = shifts.compactMap { $0 }.count
+    if Double(found) < Double(n) * 0.6 { return nil }
+    let moved: [P2] = (0..<n).map { i in
+        var win: [Double] = []
+        for k in -3...3 { if let v = shifts[(i + k + n) % n] { win.append(v) } }
+        return even[i] + outward[i] * (win.isEmpty ? 0 : median(win))
+    }
+    let out = simplifyLoop(moved, 0.25)
+    let xs = out.map(\.x), ys = out.map(\.y)
+    let x0 = xs.min() ?? 0, x1 = xs.max() ?? 0, y0 = ys.min() ?? 0, y1 = ys.max() ?? 0
+    let mx = (x0 + x1) / 2, my = (y0 + y1) / 2
+    var r = fit
+    r.outline = out.map { P2(r1($0.x - mx), r1($0.y - my)) }
+    r.outlineWorld = out.map { toWorld($0.x, $0.y) }
+    r.width = r1(x1 - x0)
+    r.length = r1(y1 - y0)
+    r.centre = toWorld(mx, my)
+    r.sharpened = true
+    return r
+}
+
+@inline(__always) func vdot2(_ a: P2, _ b: P2) -> Double { a.x * b.x + a.y * b.y }

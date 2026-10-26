@@ -58,9 +58,16 @@ Du kan ha inntil 3 slike apper samtidig.
    *Skillevegger med spor* (skyves i kryss, printes flatt), *Rutenett*, *Innsats*, *Gridfinity*-
    bunnplate eller *Lokk*, og hvor mange rom. Store ting deles opp så de passer på platen.
    Uten LiDAR, eller målt med tommestokk: *Skriv inn*.
-6. **Gjenstand** (krever LiDAR): legg tingen på et ryddig bord og sikt på den. Du får fotavtrykket
-   og høyden, og et *brett* eller en *Gridfinity-boks* med en lomme i tingens form og et grep.
-7. Alt du måler lagres på telefonen med bilde (skuffen øverst til høyre). Er CadSHAPE ikke
+6. **Ting** (krever LiDAR): legg tingen på et ryddig bord og sikt på den. Kanten finnes med LiDAR
+   og gjøres skarpere med kamerabildet (± 0,7 mm). *Legg til en ting til* samler flere i samme
+   *brett* eller *Gridfinity-boks*, med lommer i tingenes form og et grep for fingeren.
+   **Gridfinity** for en skuff (fra *Boks*) kan også få bokser som fyller den, med stablekant.
+7. **Rør** (krever LiDAR): sikt på et rør, en stang eller en slange fra siden. Du får diameteren og
+   nærmeste standard, og velger *rørklemme*, *endelokk* eller *overgang* (mål da den andre også).
+8. **Spalte** (krever LiDAR): sikt på den ene flaten og trykk *Flate 1*, så den andre og *Flate 2*.
+   Du får avstanden og vinkelen, og velger *mellomlegg*, *kile* eller et *prøvesett* med fem
+   tykkelser.
+9. Alt du måler lagres på telefonen med bilde (skuffen øverst til høyre). Er CadSHAPE ikke
    åpent, kan målingen sendes senere. Bildet vises også i CadSHAPE ved siden av delen.
 
 ## Kontroll av små hull og presspasning

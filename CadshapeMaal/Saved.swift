@@ -35,6 +35,26 @@ struct ObjectOut: Codable, Equatable {
     var json: [String: Any] { ["outline": outline, "width": width, "length": length, "height": height] }
 }
 
+/// A pipe, rod or hose (outside diameter, mm), and a second one for an adapter.
+struct PipeOut: Codable, Equatable {
+    var diameter: Double
+    var second: Double?
+
+    var json: [String: Any] {
+        var out: [String: Any] = ["diameter": diameter]
+        if let second { out["second"] = second }
+        return out
+    }
+}
+
+/// The gap between two surfaces (mm) and the angle between them (degrees).
+struct GapOut: Codable, Equatable {
+    var gap: Double
+    var angle: Double
+
+    var json: [String: Any] { ["gap": gap, "angle": angle] }
+}
+
 /// A measurement kept on the phone: made from it, or waiting to be sent when CadSHAPE is open.
 struct SavedMeasurement: Codable, Identifiable, Equatable {
     var id = UUID()
@@ -51,7 +71,13 @@ struct SavedMeasurement: Codable, Identifiable, Equatable {
     var box: BoxOut?
     var boxMake: BoxMake?
     var object: ObjectOut?
+    /// More things for the same tray (the first is `object`).
+    var objects: [ObjectOut]?
     var objectMake: ObjectMake?
+    var pipe: PipeOut?
+    var pipeMake: PipeMake?
+    var gap: GapOut?
+    var gapMake: GapMake?
     var spaceParams: [String: Double]?
     var text: String
     /// ± mm, how sure the measurement is.
@@ -71,6 +97,8 @@ struct SavedMeasurement: Codable, Identifiable, Equatable {
     var symbol: String {
         if box != nil { return "shippingbox" }
         if object != nil { return "wrench.and.screwdriver" }
+        if pipe != nil { return "cylinder" }
+        if gap != nil { return "arrow.up.and.down.square" }
         return isPattern ? "circle.grid.2x2" : "circle.dashed"
     }
 
@@ -78,6 +106,8 @@ struct SavedMeasurement: Codable, Identifiable, Equatable {
     var makeLabel: String? {
         if let m = boxMake, box != nil { return m.label }
         if let m = objectMake, object != nil { return m.label }
+        if let m = pipeMake, pipe != nil { return m.label }
+        if let m = gapMake, gap != nil { return m.label }
         if let m = holesMake, isPattern { return m.label }
         return make?.label
     }

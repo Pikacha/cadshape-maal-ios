@@ -112,10 +112,9 @@ final class Measurer: NSObject, ARSessionDelegate {
             busy = true
             last = frame.timestamp
             let generation = model.space.generation
-            let isBox = mode == .box
             queue.async { [weak self] in
                 guard let self else { return }
-                let result = self.measureSpace(frame, seed: seed, generation: generation, isBox: isBox)
+                let result = self.measureSpace(frame, seed: seed, generation: generation, mode: mode)
                 DispatchQueue.main.async {
                     self.busy = false
                     // Changed mode or started again while this was measured.
@@ -126,7 +125,13 @@ final class Measurer: NSObject, ARSessionDelegate {
                         return q.z > 0 && q.z < 1 ? CGPoint(x: CGFloat(q.x), y: CGFloat(q.y)) : nil
                     }
                     let shown = screen.count == result.world.count ? screen : []
-                    if isBox { self.model.space.update(box: result.box, screen: shown) } else { self.model.space.update(object: result.object, screen: shown) }
+                    let space = self.model.space
+                    switch mode {
+                    case .box: space.update(box: result.box, screen: shown)
+                    case .object: space.update(object: result.object, screen: shown)
+                    case .pipe: space.update(pipe: result.pipe, screen: shown)
+                    default: space.update(surface: result.surface, screen: shown)
+                    }
                 }
             }
             return
@@ -170,7 +175,17 @@ final class Measurer: NSObject, ARSessionDelegate {
 
 extension Measurer {
     /// The point cloud of the last frames and the box or object in it. Nil without LiDAR.
-    fileprivate func measureSpace(_ frame: ARFrame, seed: CGPoint, generation: Int, isBox: Bool) -> (box: BoxFit?, object: ObjectFit?, world: [V3])? {
+    fileprivate struct SpaceResult {
+        var box: BoxFit?
+        var object: ObjectFit?
+        var pipe: CylinderFit?
+        var surface: SurfaceHit?
+        /// What to draw over the picture (world points, closed).
+        var world: [V3] = []
+    }
+
+    /// The point cloud of the last frames and the box, object, pipe or surface in it. Nil without LiDAR.
+    fileprivate func measureSpace(_ frame: ARFrame, seed: CGPoint, generation: Int, mode: MeasureMode) -> SpaceResult? {
         guard let data = frame.smoothedSceneDepth ?? frame.sceneDepth, let dm = FrameReader.depth(data) else { return nil }
         let K = FrameReader.intrinsics(frame.camera)
         let pose = FrameReader.pose(frame.camera)
@@ -181,14 +196,38 @@ extension Measurer {
         // Held upright, the screen's right is the camera's y axis (its picture lies on its side).
         let right = pose.y
         guard let aim = pointAt(dm, intrinsics: K, imageWidth: iw, imageHeight: ih, pose: pose, u: Double(seed.x) * iw, v: Double(seed.y) * ih) else {
-            return (nil, nil, [])
+            return SpaceResult()
         }
-        if isBox {
+        switch mode {
+        case .box:
             let fit = fitBox(cloud.points, aim: aim, right: right)
-            return (fit, nil, fit?.corners ?? [])
+            return SpaceResult(box: fit, world: fit?.corners ?? [])
+        case .object:
+            guard var fit = fitObject(cloud.points, aim: aim, right: right) else { return SpaceResult() }
+            // The picture has the edge sharper than the LiDAR.
+            if let gray = FrameReader.gray(frame.capturedImage)?.blurred(),
+               let sharp = refineOutline(fit, gray: gray, scale: iw / Double(gray.width), intrinsics: K, pose: pose) {
+                fit = sharp
+            }
+            return SpaceResult(object: fit, world: fit.outlineWorld)
+        case .pipe:
+            guard let fit = fitCylinder(cloud.points, aim: aim, reach: 0.06) else { return SpaceResult() }
+            // The pipe's outline as seen: 4 cm along the axis, its radius to each side.
+            let across = vnormalized(vcross(fit.axis, pose.z))
+            let r = fit.diameter / 2000
+            let a = fit.axis * 0.04
+            let c = fit.centre
+            return SpaceResult(pipe: fit, world: [c - a - across * r, c + a - across * r, c + a + across * r, c - a + across * r])
+        default:
+            guard let s = surfaceNear(cloud.points, at: aim) else { return SpaceResult() }
+            // A 2 cm square on the surface.
+            let n = s.plane.normal
+            let seedDir = abs(n.x) < 0.9 ? V3(1, 0, 0) : V3(0, 1, 0)
+            let u = vnormalized(vcross(seedDir, n)) * 0.01
+            let v = vnormalized(vcross(n, u)) * 0.01
+            let p = s.point
+            return SpaceResult(surface: SurfaceHit(plane: s.plane, point: p), world: [p - u - v, p + u - v, p + u + v, p - u + v])
         }
-        let fit = fitObject(cloud.points, aim: aim, right: right)
-        return (nil, fit, fit?.outlineWorld ?? [])
     }
 }
 

@@ -7,7 +7,7 @@ import UIKit
 /// What is measured: one hole, a pattern of holes (screw holes) with their places, the inside of a
 /// box or drawer, or something lying on a table (the last two with the LiDAR point cloud).
 enum MeasureMode: String, CaseIterable, Identifiable {
-    case single, pattern, box, object
+    case single, pattern, box, object, pipe, gap
     var id: String { rawValue }
     var label: String {
         switch self {
@@ -15,6 +15,8 @@ enum MeasureMode: String, CaseIterable, Identifiable {
         case .pattern: return "Hullmønster"
         case .box: return "Inni boks"
         case .object: return "Gjenstand"
+        case .pipe: return "Rør"
+        case .gap: return "Spalte"
         }
     }
     var short: String {
@@ -23,10 +25,22 @@ enum MeasureMode: String, CaseIterable, Identifiable {
         case .pattern: return "Mønster"
         case .box: return "Boks"
         case .object: return "Ting"
+        case .pipe: return "Rør"
+        case .gap: return "Spalte"
+        }
+    }
+    var symbol: String {
+        switch self {
+        case .single: return "circle.dashed"
+        case .pattern: return "circle.grid.2x2"
+        case .box: return "shippingbox"
+        case .object: return "wrench.and.screwdriver"
+        case .pipe: return "cylinder"
+        case .gap: return "arrow.up.and.down.square"
         }
     }
     /// Measured from the point cloud, not a hole in the picture.
-    var isSpace: Bool { self == .box || self == .object }
+    var isSpace: Bool { self == .box || self == .object || self == .pipe || self == .gap }
 }
 
 /// A hole added to the pattern: where it is in the room and its shape.
@@ -692,7 +706,7 @@ final class MeasureModel: ObservableObject {
                 done(e.message)
             }
         }
-        if let body = SpaceModel.body(box: m.box, boxMake: m.boxMake, object: m.object, objectMake: m.objectMake, params: m.spaceParams ?? [:]) {
+        if let body = SpaceModel.body(m) {
             client.space(body, photo: photo) { r in finish(r.map { $0.label }) }
         } else if let holes = m.holes {
             let p = paramDict(m.holesParams, defaults: holesDefaults)
