@@ -2,10 +2,10 @@ import Foundation
 
 // Measuring with the LiDAR point cloud (many camera frames in ARKit's world, metres, y up):
 // the inside of a box or drawer (`fitBox`), and something lying on a table (`fitObject`).
-// A 1:1 port of src/scan/vision/box.ts in CadSHAPE – change both. The TypeScript side has the
+// A 1:1 port of src/scan/vision/box.ts in CadSHAPE â€“ change both. The TypeScript side has the
 // same tests with the same synthetic clouds (tests/box.test.ts).
 
-/// Value at fraction q (0…1) of the sorted values.
+/// Value at fraction q (0â€¦1) of the sorted values.
 public func quantile(_ values: [Double], _ q: Double) -> Double {
     if values.isEmpty { return .nan }
     let s = values.sorted()
@@ -39,7 +39,7 @@ public struct CameraPose {
         self.position = position
     }
 
-    /// A point in camera coordinates (x right, y down, z forward – as `Intrinsics`) to the world.
+    /// A point in camera coordinates (x right, y down, z forward â€“ as `Intrinsics`) to the world.
     public func world(_ c: V3) -> V3 { position + x * c.x + y * (-c.y) + z * (-c.z) }
 }
 
@@ -87,7 +87,7 @@ public func pointAt(_ dm: DepthMap, intrinsics K: Intrinsics, imageWidth: Double
 // MARK: The inside of a box
 
 public struct BoxFit {
-    /// Inside, mm. Width is the side across the view (left–right), length the side away from you.
+    /// Inside, mm. Width is the side across the view (leftâ€“right), length the side away from you.
     public var width: Double
     public var length: Double
     /// Height of the walls above the floor (mm); nil when the rim was not seen.
@@ -96,9 +96,9 @@ public struct BoxFit {
     public var wall: Double?
     /// Floor corners (world, m), in order round the box.
     public var corners: [V3]
-    /// Which walls had enough points: −x, +x, −y, +y of the box's own axes.
+    /// Which walls had enough points: âˆ’x, +x, âˆ’y, +y of the box's own axes.
     public var seen: [Bool]
-    /// ± mm, how sure the width and length are.
+    /// Â± mm, how sure the width and length are.
     public var spread: Double
     public var floorPoints: Int
     public var wallPoints: Int
@@ -171,7 +171,7 @@ public func fitBox(_ points: [V3], aim: V3, up: V3 = V3(0, 1, 0), right: V3? = n
     if hits.count < 60 { return nil }
 
     // 3. Which way the box is turned: the turn where the edge points pile up on the fewest lines
-    //    (sharpest 2 mm profile along both axes) – first every degree, then every tenth.
+    //    (sharpest 2 mm profile along both axes) â€“ first every degree, then every tenth.
     func sharpness(_ t: Double) -> Double {
         let ct = cos(t), st = sin(t)
         var px: [Int: Int] = [:], py: [Int: Int] = [:]
@@ -339,7 +339,7 @@ public struct ObjectFit {
     /// Outer size of the footprint (mm) along x and y.
     public var width: Double
     public var length: Double
-    /// How high it stands above the table (mm, near the top – 85th percentile) and its middle height.
+    /// How high it stands above the table (mm, near the top â€“ 85th percentile) and its middle height.
     public var height: Double
     public var midHeight: Double
     /// Middle of the footprint on the table (world, m).
@@ -599,7 +599,7 @@ func chaikin(_ pts: [P2]) -> [P2] {
     return out
 }
 
-/// Douglas–Peucker on a closed loop: drops points closer than `tol` to the line through their neighbours.
+/// Douglasâ€“Peucker on a closed loop: drops points closer than `tol` to the line through their neighbours.
 func simplifyLoop(_ pts: [P2], _ tol: Double) -> [P2] {
     if pts.count < 8 { return pts }
     var far = 0
@@ -664,7 +664,7 @@ func insetLoop(_ pts: [P2], _ d: Double) -> [P2] {
     }
 }
 
-/// Area of a loop (mm²).
+/// Area of a loop (mmÂ²).
 public func loopArea(_ pts: [P2]) -> Double {
     var a = 0.0
     for i in 0..<pts.count {
@@ -687,7 +687,7 @@ public struct CylinderFit {
     public var points: Int
 }
 
-/// Circle through 2D points: algebraic (Kåsa) start, then a few geometric (Gauss–Newton) steps.
+/// Circle through 2D points: algebraic (KÃ¥sa) start, then a few geometric (Gaussâ€“Newton) steps.
 public func circleFitGeometric(_ pts: [P2]) -> (cx: Double, cy: Double, r: Double)? {
     let n = Double(pts.count)
     if pts.count < 5 { return nil }
@@ -715,7 +715,7 @@ public func circleFitGeometric(_ pts: [P2]) -> (cx: Double, cy: Double, r: Doubl
     var cu = (a * svv - b * suv) / det
     var cv = (b * suu - a * suv) / det
     var r = (cu * cu + cv * cv + (suu + svv) / n).squareRoot()
-    // Geometric refinement: minimise Σ (|p − c| − r)².
+    // Geometric refinement: minimise Î£ (|p âˆ’ c| âˆ’ r)Â².
     for _ in 0..<8 {
         var m = [[Double]](repeating: [0, 0, 0], count: 3)
         var g = [0.0, 0.0, 0.0]
@@ -849,9 +849,21 @@ public func fitCylinder(_ points: [V3], aim: V3, reach: Double = 0.05) -> Cylind
 public func surfaceNear(_ points: [V3], at p: V3, reach: Double = 0.03) -> (plane: Plane, point: V3)? {
     let near = points.filter { vlength($0 - p) < reach }
     guard let fit = fitPlane(near, threshold: 0.004), fit.inliers >= 20 else { return nil }
+    // A small patch locates the selected surface, but its normal is noisy. A gap measured
+    // farther along that plane amplifies this tilt error. Refine with a wider patch of
+    // points agreeing with the selected plane; do not average in a nearby raised surface.
+    var plane = fit.plane
+    let residual = median(near.map { abs(vdot(plane.normal, $0) - plane.offset) })
+    let tolerance = min(0.003, max(0.002, residual * 4))
+    for radius in [reach * 2, reach * 3] {
+        let support = points.filter {
+            vlength($0 - p) < radius && abs(vdot(plane.normal, $0) - plane.offset) < tolerance
+        }
+        if support.count >= fit.inliers, let refined = leastSquaresPlane(support) { plane = refined }
+    }
     // The plane through the aimed point's foot.
-    let q = p - fit.plane.normal * (vdot(fit.plane.normal, p) - fit.plane.offset)
-    return (fit.plane, q)
+    let q = p - plane.normal * (vdot(plane.normal, p) - plane.offset)
+    return (plane, q)
 }
 
 /// The gap between two surfaces (mm, from the second point straight to the first surface) and the
@@ -898,7 +910,7 @@ private func sampleGray(_ g: GrayImage, _ x: Double, _ y: Double) -> Double {
 /// The LiDAR footprint is good to a couple of mm; the camera picture has the edge to a fraction of
 /// a mm. For each point round the outline: look across the edge in the picture (between where the
 /// table-level and the top-level outline land), take the strongest brightness step, and lay it back
-/// on the table – at table level where the side faces the camera (its bottom edge is what shows),
+/// on the table â€“ at table level where the side faces the camera (its bottom edge is what shows),
 /// at the top where it faces away. Points without a clear step keep the LiDAR edge (a running
 /// median along the loop smooths single wrong steps). Nil when too little of the edge was found.
 /// `scale`: full-picture pixels per pixel of `gray`.
@@ -936,7 +948,7 @@ public func refineOutline(_ fit: ObjectFit, gray g: GrayImage, scale: Double, in
         nrm /= max(1e-12, vlen2(nrm))
         if vdot2(nrm, p - mid) < 0 { nrm = -nrm }
         outward[i] = nrm
-        // The search line in the picture: ±4 mm across the edge, at the table and at the top.
+        // The search line in the picture: Â±4 mm across the edge, at the table and at the top.
         var ends: [P2] = []
         for d in [-4.0, 4.0] {
             for h in [0.0, H] {
