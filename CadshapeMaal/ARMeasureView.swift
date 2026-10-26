@@ -40,6 +40,8 @@ final class Measurer: NSObject, ARSessionDelegate {
     private var busy = false
     private var last: TimeInterval = 0
     private var lastProjected: TimeInterval = 0
+    /// Box and object modes: the last frames' LiDAR points together (used on `queue` only).
+    private let cloud = PointCloudFrames()
 
     init(model: MeasureModel) {
         self.model = model
@@ -85,7 +87,9 @@ final class Measurer: NSObject, ARSessionDelegate {
                 return p.z > 0 && p.z < 1 ? CGPoint(x: CGFloat(p.x), y: CGFloat(p.y)) : nil
             }
         }
-        if busy || frame.timestamp - last < 0.12 { return }
+        let mode = model.mode
+        let spaceMode = mode.isSpace && !model.space.locked && !model.wantsPairing
+        if busy || frame.timestamp - last < (spaceMode ? 0.2 : 0.12) { return }
         guard let view = view, view.bounds.width > 0 else { return }
         busy = true
         last = frame.timestamp
@@ -94,13 +98,37 @@ final class Measurer: NSObject, ARSessionDelegate {
         // The cross-hair is the middle of the screen; in the picture's own coordinates (0…1):
         let seed = CGPoint(x: 0.5, y: 0.5).applying(toView.inverted())
         let pairing = model.wantsPairing
-        let measuring = !model.locked && !pairing
+        let measuring = !model.locked && !pairing && !mode.isSpace
         let tracking = frame.camera.trackingState
         let cameraToWorld = frame.camera.transform
         let imageWidth = Double(frame.camera.imageResolution.width)
         var fallback: Plane? = nil
         if measuring && frame.smoothedSceneDepth == nil && frame.sceneDepth == nil {
             fallback = FrameReader.raycastPlane(session, frame, at: seed)
+        }
+
+        if spaceMode {
+            busy = true
+            last = frame.timestamp
+            let generation = model.space.generation
+            let isBox = mode == .box
+            queue.async { [weak self] in
+                guard let self else { return }
+                let result = self.measureSpace(frame, seed: seed, generation: generation, isBox: isBox)
+                DispatchQueue.main.async {
+                    self.busy = false
+                    // Changed mode or started again while this was measured.
+                    guard self.model.space.generation == generation, !self.model.space.locked else { return }
+                    guard let result else { return self.model.space.noLidar() }
+                    let screen: [CGPoint] = result.world.compactMap { p in
+                        let q = view.projectPoint(SCNVector3(Float(p.x), Float(p.y), Float(p.z)))
+                        return q.z > 0 && q.z < 1 ? CGPoint(x: CGFloat(q.x), y: CGFloat(q.y)) : nil
+                    }
+                    let shown = screen.count == result.world.count ? screen : []
+                    if isBox { self.model.space.update(box: result.box, screen: shown) } else { self.model.space.update(object: result.object, screen: shown) }
+                }
+            }
+            return
         }
 
         queue.async { [weak self] in
@@ -138,8 +166,59 @@ final class Measurer: NSObject, ARSessionDelegate {
     }
 }
 
+extension Measurer {
+    /// The point cloud of the last frames and the box or object in it. Nil without LiDAR.
+    fileprivate func measureSpace(_ frame: ARFrame, seed: CGPoint, generation: Int, isBox: Bool) -> (box: BoxFit?, object: ObjectFit?, world: [V3])? {
+        guard let data = frame.smoothedSceneDepth ?? frame.sceneDepth, let dm = FrameReader.depth(data) else { return nil }
+        let K = FrameReader.intrinsics(frame.camera)
+        let pose = FrameReader.pose(frame.camera)
+        let iw = Double(frame.camera.imageResolution.width)
+        let ih = Double(frame.camera.imageResolution.height)
+        if cloud.generation != generation { cloud.reset(generation) }
+        cloud.add(cloudPoints(dm, intrinsics: K, imageWidth: iw, imageHeight: ih, pose: pose))
+        // Held upright, the screen's right is the camera's y axis (its picture lies on its side).
+        let right = pose.y
+        guard let aim = pointAt(dm, intrinsics: K, imageWidth: iw, imageHeight: ih, pose: pose, u: Double(seed.x) * iw, v: Double(seed.y) * ih) else {
+            return (nil, nil, [])
+        }
+        if isBox {
+            let fit = fitBox(cloud.points, aim: aim, right: right)
+            return (fit, nil, fit?.corners ?? [])
+        }
+        let fit = fitObject(cloud.points, aim: aim, right: right)
+        return (nil, fit, fit?.outlineWorld ?? [])
+    }
+}
+
+/// The LiDAR points of the last few frames (ARKit's world stays put while the phone moves, so
+/// together they fill each other's gaps).
+final class PointCloudFrames {
+    private(set) var generation = -1
+    private var frames: [[V3]] = []
+    private let keep = 5
+
+    func reset(_ g: Int) {
+        generation = g
+        frames = []
+    }
+
+    func add(_ pts: [V3]) {
+        frames.append(pts)
+        if frames.count > keep { frames.removeFirst(frames.count - keep) }
+    }
+
+    var points: [V3] { frames.flatMap { $0 } }
+}
+
 /// Reading ARKit's frame data into HoleKit's plain arrays.
 enum FrameReader {
+    /// The camera's place and axes in the world.
+    static func pose(_ camera: ARCamera) -> CameraPose {
+        let t = camera.transform
+        func v(_ c: SIMD4<Float>) -> V3 { V3(Double(c.x), Double(c.y), Double(c.z)) }
+        return CameraPose(x: v(t.columns.0), y: v(t.columns.1), z: v(t.columns.2), position: v(t.columns.3))
+    }
+
     /// The picture's brightness (the Y plane of the camera's YCbCr picture), at half size.
     static func gray(_ buffer: CVPixelBuffer) -> GrayImage? {
         CVPixelBufferLockBaseAddress(buffer, .readOnly)

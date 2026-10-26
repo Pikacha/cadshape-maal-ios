@@ -16,7 +16,7 @@ struct ContentView: View {
             } else {
                 ARMeasureView(model: model).ignoresSafeArea()
             }
-            OverlayView(model: model).ignoresSafeArea().allowsHitTesting(false)
+            OverlayView(model: model, space: model.space).ignoresSafeArea().allowsHitTesting(false)
             VStack(spacing: 12) {
                 TopBar(model: model)
                 Spacer(minLength: 0)
@@ -55,6 +55,7 @@ struct ContentView: View {
 /// The cross-hair, the hole's outline as found, and its size next to it.
 struct OverlayView: View {
     @ObservedObject var model: MeasureModel
+    @ObservedObject var space: SpaceModel
 
     var body: some View {
         Canvas { ctx, size in
@@ -65,7 +66,22 @@ struct OverlayView: View {
                 ctx.stroke(Path(roundedRect: frame, cornerRadius: 28), with: .color(accent), style: StrokeStyle(lineWidth: 3, dash: [18, 12]))
                 return
             }
-            let pts = model.outlineOnScreen
+            // The box's floor or the object's footprint, from the LiDAR points.
+            if model.mode.isSpace {
+                let poly = space.polygonOnScreen
+                if poly.count > 2 && !space.locked {
+                    var p = Path()
+                    p.addLines(poly)
+                    p.closeSubpath()
+                    let color = space.steadiness > 0.7 ? good : accent
+                    ctx.fill(p, with: .color(color.opacity(0.18)))
+                    ctx.stroke(p, with: .color(color), style: StrokeStyle(lineWidth: 3, lineJoin: .round))
+                    for q in poly where model.mode == .box {
+                        ctx.fill(Path(ellipseIn: CGRect(x: q.x - 5, y: q.y - 5, width: 10, height: 10)), with: .color(color))
+                    }
+                }
+            }
+            let pts = model.mode.isSpace ? [] : model.outlineOnScreen
             if pts.count > 2 {
                 var p = Path()
                 p.addLines(pts)
@@ -88,7 +104,7 @@ struct OverlayView: View {
                 ctx.fill(Path(ellipseIn: CGRect(x: p.x - r, y: p.y - r, width: 2 * r, height: 2 * r)), with: .color(good.opacity(0.85)))
                 ctx.draw(Text("\(i + 1)").font(.system(size: 15, weight: .bold, design: .rounded)).foregroundColor(.black), at: p)
             }
-            if !model.locked && !model.patternLocked {
+            if !model.locked && !model.patternLocked && !(model.mode.isSpace && space.locked) {
                 var cross = Path()
                 for (dx, dy) in [(-1.0, 0.0), (1.0, 0.0), (0.0, -1.0), (0.0, 1.0)] {
                     cross.move(to: CGPoint(x: c.x + dx * 6, y: c.y + dy * 6))
@@ -199,7 +215,9 @@ struct BottomPanel: View {
     }
 
     @ViewBuilder private var content: some View {
-        if model.patternLocked {
+        if model.mode.isSpace {
+            SpaceContent(model: model, space: model.space)
+        } else if model.patternLocked {
             PatternLockedContent(model: model)
         } else if model.locked {
             LockedContent(model: model)
@@ -215,7 +233,7 @@ struct WaitingBanner: View {
     @ObservedObject var store: MeasurementStore
 
     var body: some View {
-        if model.connected && !model.isDemo && !store.waiting.isEmpty && !model.locked && !model.patternLocked {
+        if model.connected && !model.isDemo && !store.waiting.isEmpty && !model.locked && !model.patternLocked && !model.space.locked {
             Button {
                 model.showSaved = true
             } label: {
@@ -264,10 +282,7 @@ struct LiveContent: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
-            Picker("Hva måles", selection: $model.mode) {
-                ForEach(MeasureMode.allCases) { m in Text(m.label).tag(m) }
-            }
-            .pickerStyle(.segmented)
+            ModePicker(model: model)
             SizeHeader(text: model.answer?.text ?? model.quick ?? "Sikt på hullet", sure: model.uncertaintyText, unsure: model.unsure, label: model.answer?.label)
             if !model.details.isEmpty {
                 Text(model.details).font(.footnote).opacity(0.75)
@@ -538,7 +553,7 @@ struct SavedSheet: View {
                     Text(problem).font(.footnote).foregroundStyle(accent)
                 }
                 if store.items.isEmpty {
-                    Text("Ingen målinger ennå. Alt du låser lagres her, også når CadSHAPE ikke er åpent.").font(.footnote).foregroundStyle(.secondary)
+                    Text("Ingen målinger ennå. Alt du låser lagres her – hull, mønstre, bokser og ting – også når CadSHAPE ikke er åpent.").font(.footnote).foregroundStyle(.secondary)
                 }
                 ForEach(store.items) { m in
                     HStack(spacing: 12) {
@@ -546,7 +561,7 @@ struct SavedSheet: View {
                             if let img = store.image(m) {
                                 Image(uiImage: img).resizable().aspectRatio(contentMode: .fill)
                             } else {
-                                Image(systemName: m.isPattern ? "circle.grid.2x2" : "circle.dashed").font(.title2).foregroundStyle(.secondary)
+                                Image(systemName: m.symbol).font(.title2).foregroundStyle(.secondary)
                             }
                         }
                         .frame(width: 58, height: 58)
@@ -592,8 +607,7 @@ struct SavedSheet: View {
 
     private func subtitle(_ m: SavedMeasurement) -> String {
         var parts = [m.date.formatted(date: .abbreviated, time: .shortened)]
-        if let make = m.make, !m.isPattern { parts.append(make.label) }
-        if let make = m.holesMake, m.isPattern { parts.append(make.label) }
+        if let make = m.makeLabel { parts.append(make) }
         if let u = m.uncertainty { parts.append("± \(mm(u)) mm") }
         parts.append(m.sentAt == nil ? "venter" : "laget")
         return parts.joined(separator: " · ")
@@ -735,6 +749,8 @@ struct SettingsSheet: View {
                     Text("Kanten på hullet finnes i kamerabildet (eller i LiDAR-dybden når hullet ikke skiller seg ut). LiDAR måler flaten rundt hullet – avstand og vinkel – og kanten legges ned på flaten i millimeter. ± viser hvor sikkert målet er. LiDAR ser også hvor dypt hullet er.")
                         .font(.footnote)
                     Text("Best resultat: 30–80 cm unna, mest mulig rett på, godt lys og hele kanten i bildet.")
+                        .font(.footnote)
+                    Text("Inni boks og Gjenstand bruker LiDAR-punktene fra flere bilder samlet: bunnen, de fire veggene og kanten øverst (boks), eller bordet og alt som står opp fra det (gjenstand). Hold telefonen 25–60 cm over, rett ned. Tomme bokser og ryddige bord gir best mål; svarte og blanke flater ser LiDAR dårlig.")
                         .font(.footnote)
                 }
             }

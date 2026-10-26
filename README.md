@@ -49,14 +49,22 @@ Du kan ha inntil 3 slike apper samtidig.
 4. **Hullmønster** (skruehull i en brakett, et kretskort …): velg *Hullmønster*, sikt på hullene
    ett for ett – hvert hull legges til når det er stødig og får et nummer i bildet – og trykk
    *Ferdig*. Du får en plate med hullene på riktig sted, eller bare hullene.
-5. Alt du måler lagres på telefonen med bilde (skuffen øverst til høyre). Er CadSHAPE ikke
+5. **Inni boks** (krever LiDAR): hold telefonen over en boks eller skuff og sikt krysset på bunnen.
+   Appen samler LiDAR-punktene fra flere bilder og finner bunnen, de fire veggene (de lyser grønt
+   når de er sett) og kanten øverst – innvendig bredde, lengde, høyde og veggtykkelse. Velg
+   *Skillevegger med spor* (skyves i kryss, printes flatt), *Rutenett*, *Innsats*, *Gridfinity*-
+   bunnplate eller *Lokk*, og hvor mange rom. Store ting deles opp så de passer på platen.
+   Uten LiDAR, eller målt med tommestokk: *Skriv inn*.
+6. **Gjenstand** (krever LiDAR): legg tingen på et ryddig bord og sikt på den. Du får fotavtrykket
+   og høyden, og et *brett* eller en *Gridfinity-boks* med en lomme i tingens form og et grep.
+7. Alt du måler lagres på telefonen med bilde (skuffen øverst til høyre). Er CadSHAPE ikke
    åpent, kan målingen sendes senere. Bildet vises også i CadSHAPE ved siden av delen.
 
 ## Slik er appen bygd
 
 | Mappe | Innhold |
 | --- | --- |
-| `HoleKit/` | Målematematikken uten Apple-UI: hullfinner, LiDAR-plan (RANSAC + minste kvadrater), stråle → plan → mm, sirkeltilpasning. Testes med `swift test`. |
+| `HoleKit/` | Målematematikken uten Apple-UI: hullfinner, LiDAR-plan (RANSAC + minste kvadrater), stråle → plan → mm, sirkeltilpasning, boks og gjenstand fra punktskyen (`Box.swift`, port av `src/scan/vision/box.ts`). Testes med `swift test`. |
 | `CadshapeMaal/` | SwiftUI-appen: ARKit (kamera, LiDAR, linse), QR-tilkobling, tegning over kamerabildet, kontakt med CadSHAPE. |
 | `project.yml` | Xcode-prosjektet (XcodeGen). |
 | `.github/workflows/build.yml` | Bygger på en Mac hos GitHub: tester HoleKit, bygger usignert IPA og legger den på release «latest». |

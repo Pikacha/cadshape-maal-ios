@@ -240,6 +240,19 @@ final class CadshapeClient: NSObject, URLSessionDelegate {
         }
     }
 
+    /// The inside of a box or something on a table (LiDAR): CadSHAPE makes the parts. Gives their
+    /// description and short notes (split for the plate, what fits …).
+    func space(_ body: [String: Any], photo: String?, done: @escaping (Result<(label: String, notes: [String]), ClientError>) -> Void) {
+        var body = body
+        if let photo { body["photo"] = photo }
+        call(request("api/live/scan", body: try? JSONSerialization.data(withJSONObject: body))) { r in
+            done(r.map { json in
+                let result = json["result"] as? [String: Any]
+                return (result?["label"] as? String ?? "Delen", result?["notes"] as? [String] ?? [])
+            })
+        }
+    }
+
     func clear() {
         call(request("api/live/scan", body: try? JSONSerialization.data(withJSONObject: ["type": "clear"]))) { _ in }
     }

@@ -10,6 +10,30 @@ struct PatternHoleOut: Codable, Equatable {
     var shape: MeasuredShape
 }
 
+/// The inside of a box, as sent (mm). Height 0 = not measured.
+struct BoxOut: Codable, Equatable {
+    var width: Double
+    var length: Double
+    var height: Double
+    var wall: Double?
+
+    var json: [String: Any] {
+        var out: [String: Any] = ["width": width, "length": length, "height": height]
+        if let wall { out["wall"] = wall }
+        return out
+    }
+}
+
+/// Something on a table: its footprint seen from above (mm, x right, y away, centred) and height.
+struct ObjectOut: Codable, Equatable {
+    var outline: [[Double]]
+    var width: Double
+    var length: Double
+    var height: Double
+
+    var json: [String: Any] { ["outline": outline, "width": width, "length": length, "height": height] }
+}
+
 /// A measurement kept on the phone: made from it, or waiting to be sent when CadSHAPE is open.
 struct SavedMeasurement: Codable, Identifiable, Equatable {
     var id = UUID()
@@ -22,6 +46,12 @@ struct SavedMeasurement: Codable, Identifiable, Equatable {
     var holes: [PatternHoleOut]?
     var holesMake: HolesMake?
     var holesParams: [String: Double]?
+    /// … or the inside of a box, or something on a table (with what to make and its settings).
+    var box: BoxOut?
+    var boxMake: BoxMake?
+    var object: ObjectOut?
+    var objectMake: ObjectMake?
+    var spaceParams: [String: Double]?
     var text: String
     /// ± mm, how sure the measurement is.
     var uncertainty: Double?
@@ -32,6 +62,21 @@ struct SavedMeasurement: Codable, Identifiable, Equatable {
     var sentAt: Date?
 
     var isPattern: Bool { holes != nil }
+
+    /// A picture for the list when there is no photo.
+    var symbol: String {
+        if box != nil { return "shippingbox" }
+        if object != nil { return "wrench.and.screwdriver" }
+        return isPattern ? "circle.grid.2x2" : "circle.dashed"
+    }
+
+    /// What is made from it, for the list.
+    var makeLabel: String? {
+        if let m = boxMake, box != nil { return m.label }
+        if let m = objectMake, object != nil { return m.label }
+        if let m = holesMake, isPattern { return m.label }
+        return make?.label
+    }
 }
 
 /// The measurements on this phone (Documents/maalinger/liste.json and the pictures next to it).

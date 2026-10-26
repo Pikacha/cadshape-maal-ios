@@ -4,11 +4,29 @@ import Foundation
 import HoleKit
 import UIKit
 
-/// What is measured: one hole, or a pattern of holes (screw holes) with their places.
+/// What is measured: one hole, a pattern of holes (screw holes) with their places, the inside of a
+/// box or drawer, or something lying on a table (the last two with the LiDAR point cloud).
 enum MeasureMode: String, CaseIterable, Identifiable {
-    case single, pattern
+    case single, pattern, box, object
     var id: String { rawValue }
-    var label: String { self == .single ? "Ett hull" : "Hullmønster" }
+    var label: String {
+        switch self {
+        case .single: return "Ett hull"
+        case .pattern: return "Hullmønster"
+        case .box: return "Inni boks"
+        case .object: return "Gjenstand"
+        }
+    }
+    var short: String {
+        switch self {
+        case .single: return "Hull"
+        case .pattern: return "Mønster"
+        case .box: return "Boks"
+        case .object: return "Ting"
+        }
+    }
+    /// Measured from the point cloud, not a hole in the picture.
+    var isSpace: Bool { self == .box || self == .object }
 }
 
 /// A hole added to the pattern: where it is in the room and its shape.
@@ -79,6 +97,8 @@ final class MeasureModel: ObservableObject {
     @Published var holesParams: [ParamKey: Double] = holesDefaults
 
     let store = MeasurementStore()
+    /// The inside of a box, or something on a table.
+    let space = SpaceModel()
     /// The measurement saved on the phone for the locked hole or pattern.
     private(set) var savedId: UUID?
 
@@ -104,6 +124,7 @@ final class MeasureModel: ObservableObject {
     var isDemo: Bool { demo != nil }
 
     init() {
+        space.owner = self
         if demo != nil {
             hasLidar = true
             wantsPairing = demo == "pairing"
@@ -190,7 +211,7 @@ final class MeasureModel: ObservableObject {
     // MARK: Live measuring
 
     func measured(_ r: Result<FrameMeasurement, MeasureFailure>, toScreen: (P2) -> CGPoint, tracking: ARCamera.TrackingState, cameraToWorld: simd_float4x4? = nil) {
-        if locked || patternLocked { return }
+        if locked || patternLocked || mode.isSpace { return }
         switch r {
         case .success(let m):
             history.append(m)
@@ -490,6 +511,14 @@ final class MeasureModel: ObservableObject {
         pattern = []
         patternOnScreen = []
         patternLocked = false
+        space.reset()
+        if mode.isSpace && !hasLidar { space.noLidar() }
+    }
+
+    /// The box or object parts to CadSHAPE (SpaceModel).
+    func sendSpace(_ body: [String: Any], photo: String?, done: @escaping (Result<(label: String, notes: [String]), ClientError>) -> Void) {
+        guard let client, connected else { return done(.failure(.offline("CadSHAPE er ikke åpent."))) }
+        client.space(body, photo: photo, done: done)
     }
 
     /// The hole in the cross-hair is already in the pattern (its middle is within half its size).
@@ -636,7 +665,9 @@ final class MeasureModel: ObservableObject {
                 done(e.message)
             }
         }
-        if let holes = m.holes {
+        if let body = SpaceModel.body(box: m.box, boxMake: m.boxMake, object: m.object, objectMake: m.objectMake, params: m.spaceParams ?? [:]) {
+            client.space(body, photo: photo) { r in finish(r.map { $0.label }) }
+        } else if let holes = m.holes {
             let p = paramDict(m.holesParams, defaults: holesDefaults)
             client.holes(holes, make: m.holesMake ?? .plate, params: p, photo: photo, done: finish)
         } else if let shape = m.shape {
