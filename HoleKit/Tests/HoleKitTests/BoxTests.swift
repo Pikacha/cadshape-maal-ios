@@ -41,7 +41,7 @@ private func boxCloud(w: Double, l: Double, h: Double, t: Double, turn: Double, 
 }
 
 /// An oval lying on a table, a second thing further away, and optionally a tab on the far side
-/// (world âˆ’z: away from a camera that looks along âˆ’z).
+/// (world −z: away from a camera that looks along −z).
 private func objectCloud(a: Double, b: Double, h: Double, noise: Double, tab: Bool = false) -> [V3] {
     var r = Noise(state: 3)
     var pts: [V3] = []
@@ -120,7 +120,7 @@ final class BoxTests: XCTestCase {
     }
 
     func testCloudFromDepthGoesToTheWorld() throws {
-        // A flat floor 0.5 m below a camera looking straight down (ARKit: camera âˆ’z = world âˆ’y).
+        // A flat floor 0.5 m below a camera looking straight down (ARKit: camera −z = world −y).
         let K = Intrinsics(fx: 100, fy: 100, cx: 64, cy: 48)
         let dm = DepthMap(width: 128, height: 96, depth: [Float](repeating: 0.5, count: 128 * 96), confidence: nil)
         let pose = CameraPose(x: V3(1, 0, 0), y: V3(0, 0, -1), z: V3(0, 1, 0), position: V3(0, 1, 0))
@@ -212,7 +212,7 @@ final class SpaceMoreTests: XCTestCase {
     }
 
     func testGapBetweenTwoSurfaces() throws {
-        // A floor, and a board 6 mm above it tilted 3Â° (as under a furniture foot).
+        // A floor, and a board 6 mm above it tilted 3° (as under a furniture foot).
         var pts: [V3] = []
         var r = Noise(state: 5)
         for x in stride(from: -0.05, through: 0.05, by: 0.004) {
