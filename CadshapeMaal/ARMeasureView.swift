@@ -65,10 +65,11 @@ final class Measurer: NSObject, ARSessionDelegate {
         self.config = config
         config.planeDetection = [.horizontal, .vertical]
         config.isAutoFocusEnabled = true
-        if ARWorldTrackingConfiguration.supportsFrameSemantics(.smoothedSceneDepth) {
-            config.frameSemantics.insert(.smoothedSceneDepth)
-        } else if ARWorldTrackingConfiguration.supportsFrameSemantics(.sceneDepth) {
+        // Use depth paired with this capturedImage. Temporal smoothing is for visuals and can lag motion.
+        if ARWorldTrackingConfiguration.supportsFrameSemantics(.sceneDepth) {
             config.frameSemantics.insert(.sceneDepth)
+        } else if ARWorldTrackingConfiguration.supportsFrameSemantics(.smoothedSceneDepth) {
+            config.frameSemantics.insert(.smoothedSceneDepth)
         }
         model.hasLidar = ARWorldTrackingConfiguration.supportsFrameSemantics(.sceneDepth)
         view?.session.run(config, options: [.resetTracking, .removeExistingAnchors])
@@ -144,10 +145,11 @@ final class Measurer: NSObject, ARSessionDelegate {
             if measuring, let gray = FrameReader.gray(frame.capturedImage) {
                 gw = Double(gray.width)
                 gh = Double(gray.height)
-                let depth = (frame.smoothedSceneDepth ?? frame.sceneDepth).flatMap { FrameReader.depth($0) }
+                let depth = (frame.sceneDepth ?? frame.smoothedSceneDepth).flatMap { FrameReader.depth($0) }
                 let input = FrameInput(
                     gray: gray, scale: imageWidth / gw, intrinsics: FrameReader.intrinsics(frame.camera),
-                    depth: depth, fallbackPlane: fallback, seed: P2(Double(seed.x) * gw, Double(seed.y) * gh)
+                    depth: depth, fallbackPlane: fallback, seed: P2(Double(seed.x) * gw, Double(seed.y) * gh),
+                    usedSmoothedDepth: frame.sceneDepth == nil && frame.smoothedSceneDepth != nil
                 )
                 result = measureFrame(input)
             }

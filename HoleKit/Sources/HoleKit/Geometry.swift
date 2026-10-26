@@ -96,6 +96,9 @@ func leastSquaresPlane(_ pts: [V3]) -> Plane? {
         for i in 0..<3 { for j in 0..<3 { m[i][j] += e[i] * e[j] } }
     }
     let (vals, vecs) = eigenSymmetric3(m)
+    // A narrow strip/line cannot determine the wall's tilt reliably.
+    let spread = vals.sorted()
+    if spread[1] <= max(1e-12, spread[2] * 0.001) { return nil }
     var k = 0
     if vals[1] < vals[k] { k = 1 }
     if vals[2] < vals[k] { k = 2 }
@@ -125,6 +128,8 @@ public func fitPlane(_ pts: [V3], iterations: Int = 150, threshold: Double = 0.0
     guard let found = best else { return nil }
     let rough = found.0
     let inliers = pts.filter { abs(vdot(rough.normal, $0) - rough.offset) < threshold }
+    // RANSAC always finds some plane, even in a random cloud. Require broad support.
+    if inliers.count < max(12, Int(ceil(Double(pts.count) * 0.6))) { return nil }
     guard let refined = leastSquaresPlane(inliers) else { return nil }
     return (refined, inliers.count)
 }

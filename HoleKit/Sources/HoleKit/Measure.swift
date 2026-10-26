@@ -35,14 +35,17 @@ public struct FrameInput {
     public var fallbackPlane: Plane?
     /// Where to look for the hole (coordinates in `gray`).
     public var seed: P2
+    /// Only a fallback: averaged depth can lag the current camera picture.
+    public var usedSmoothedDepth: Bool
 
-    public init(gray: GrayImage, scale: Double, intrinsics: Intrinsics, depth: DepthMap?, fallbackPlane: Plane?, seed: P2) {
+    public init(gray: GrayImage, scale: Double, intrinsics: Intrinsics, depth: DepthMap?, fallbackPlane: Plane?, seed: P2, usedSmoothedDepth: Bool = false) {
         self.gray = gray
         self.scale = scale
         self.intrinsics = intrinsics
         self.depth = depth
         self.fallbackPlane = fallbackPlane
         self.seed = seed
+        self.usedSmoothedDepth = usedSmoothedDepth
     }
 }
 
@@ -74,6 +77,12 @@ public struct FrameMeasurement {
     public var centre: V3 = V3(0, 0, 0)
     /// How deep the hole is behind the surface (mm, from LiDAR), when it has a bottom the LiDAR sees.
     public var depthMM: Double?
+    /// Millimetres across one analysis pixel at the detected edge, including perspective.
+    public var edgeResolutionMM = 0.0
+    public var edgePixels = 0.0
+    public var planeResidualMM = 0.0
+    public var planeInlierRatio = 0.0
+    public var usedSmoothedDepth = false
 }
 
 public enum MeasureFailure: Error {
@@ -91,15 +100,24 @@ public func measureFrame(_ input: FrameInput) -> Result<FrameMeasurement, Measur
     if let hole = findHole(g, seed: input.seed) {
         var plane: Plane? = nil
         var used = 0
+        var residualMM = 0.0, inlierRatio = 0.0
         if let dm = input.depth, let fit = surfaceAround(hole, gray: g, depth: dm, intrinsics: K, scale: s) {
             plane = fit.plane
             used = fit.inliers
+            residualMM = fit.residualMM
+            inlierRatio = fit.ratio
         }
         if plane == nil { plane = input.fallbackPlane }
         guard let surface = plane else { return .failure(.noSurface) }
         let full = hole.outline.map { $0 * s }
         guard let m = layOnto(full, surface, K) else { return .failure(.noSurface) }
         var r = result(outlineGray: hole.outline, mm: m, plane: surface, used: used, source: .picture)
+        r.edgeResolutionMM = edgeResolution(full, plane: surface, intrinsics: K, dx: s, dy: s)
+        guard r.edgeResolutionMM.isFinite && r.edgeResolutionMM > 0 else { return .failure(.noSurface) }
+        r.edgePixels = Double(min(hole.maxX - hole.minX + 1, hole.maxY - hole.minY + 1))
+        r.planeResidualMM = residualMM
+        r.planeInlierRatio = inlierRatio
+        r.usedSmoothedDepth = input.usedSmoothedDepth
         r.centre = centreOn(full, surface, K) ?? r.centre
         if let dm = input.depth { r.depthMM = depthInside(hole, gray: g, depth: dm, plane: surface, intrinsics: K, scale: s) }
         return .success(r)
@@ -114,9 +132,34 @@ public func measureFrame(_ input: FrameInput) -> Result<FrameMeasurement, Measur
     let full = dh.outline.map { P2($0.x * sx, $0.y * sy) }
     guard let m = layOnto(full, dh.plane, K) else { return .failure(.noSurface) }
     var r = result(outlineGray: full.map { $0 / s }, mm: m, plane: dh.plane, used: dh.inliers, source: .depth)
+    r.edgeResolutionMM = edgeResolution(full, plane: dh.plane, intrinsics: K, dx: sx, dy: sy)
+    guard r.edgeResolutionMM.isFinite && r.edgeResolutionMM > 0 else { return .failure(.noSurface) }
+    let xs = dh.outline.map(\.x), ys = dh.outline.map(\.y)
+    r.edgePixels = min((xs.max() ?? 0) - (xs.min() ?? 0), (ys.max() ?? 0) - (ys.min() ?? 0))
+    r.planeResidualMM = dh.residualMM
+    r.planeInlierRatio = dh.ratio
+    r.usedSmoothedDepth = input.usedSmoothedDepth
     r.centre = centreOn(full, dh.plane, K) ?? r.centre
     r.depthMM = dh.depthMM
     return .success(r)
+}
+
+/// Pixel footprint on the measured plane; interpolating an edge does not remove this resolution limit.
+func edgeResolution(_ outline: [P2], plane: Plane, intrinsics K: Intrinsics, dx: Double, dy: Double) -> Double {
+    var largest = 0.0
+    for i in stride(from: 0, to: outline.count, by: max(1, outline.count / 32)) {
+        let p = outline[i]
+        guard let a = plane.hit(K.ray(p.x, p.y)),
+              let x = plane.hit(K.ray(p.x + dx, p.y)),
+              let y = plane.hit(K.ray(p.x, p.y + dy)) else { return .infinity }
+        largest = max(largest, max(vlength(x - a), vlength(y - a)) * 1000)
+    }
+    return largest
+}
+
+func surfaceResidualMM(_ points: [V3], plane: Plane, threshold: Double) -> Double {
+    let residuals = points.map { abs(vdot(plane.normal, $0) - plane.offset) }.filter { $0 < threshold }
+    return (residuals.reduce(0) { $0 + $1 * $1 } / Double(max(1, residuals.count))).squareRoot() * 1000
 }
 
 /// The middle of an outline (full-picture pixels) on the surface, camera coordinates (m).
@@ -210,7 +253,7 @@ func result(outlineGray: [P2], mm: [P2], plane: Plane, used: Int, source: HoleSo
 
 /// The wall/ceiling around a hole: LiDAR points in a band around it (not in it – there the depth is
 /// the hole's inside, and right at the edge the depth mixes the two).
-func surfaceAround(_ hole: Hole, gray g: GrayImage, depth dm: DepthMap, intrinsics K: Intrinsics, scale s: Double) -> (plane: Plane, inliers: Int)? {
+func surfaceAround(_ hole: Hole, gray g: GrayImage, depth dm: DepthMap, intrinsics K: Intrinsics, scale s: Double) -> (plane: Plane, inliers: Int, residualMM: Double, ratio: Double)? {
     let w = g.width
     let h = g.height
     let bw = Double(hole.maxX - hole.minX + 1)
@@ -246,13 +289,13 @@ func surfaceAround(_ hole: Hole, gray g: GrayImage, depth dm: DepthMap, intrinsi
     }
     let pts = high.count >= 60 ? high : high + medium
     guard let fit = fitPlane(pts), fit.inliers >= 20 else { return nil }
-    return fit
+    return (fit.plane, fit.inliers, surfaceResidualMM(pts, plane: fit.plane, threshold: 0.008), Double(fit.inliers) / Double(pts.count))
 }
 
 /// The hole from LiDAR alone: the patch around the aimed point that lies clearly behind the
 /// surface around it (or has no depth at all – an open hole into a dark cavity).
 /// Works in depth-map pixels; `sx`, `sy` = full-picture pixels per depth pixel.
-func depthHole(_ dm: DepthMap, intrinsics K: Intrinsics, sx: Double, sy: Double, seed: P2) -> (outline: [P2], plane: Plane, inliers: Int, depthMM: Double?)? {
+func depthHole(_ dm: DepthMap, intrinsics K: Intrinsics, sx: Double, sy: Double, seed: P2) -> (outline: [P2], plane: Plane, inliers: Int, depthMM: Double?, residualMM: Double, ratio: Double)? {
     let w = dm.width
     let h = dm.height
     let si = Int(seed.x), sj = Int(seed.y)
@@ -322,5 +365,6 @@ func depthHole(_ dm: DepthMap, intrinsics K: Intrinsics, sx: Double, sy: Double,
     })
     if outline.count < 8 { return nil }
     let depthMM = deep.isEmpty ? nil : inside * abs(plane.normal.z) * 1000
-    return (outline, plane, fit.inliers, depthMM.flatMap { $0 < maxDepthMM ? $0 : nil })
+    return (outline, plane, fit.inliers, depthMM.flatMap { $0 < maxDepthMM ? $0 : nil },
+        surfaceResidualMM(pts, plane: plane, threshold: 0.012), Double(fit.inliers) / Double(pts.count))
 }

@@ -42,8 +42,11 @@ Du kan ha inntil 3 slike apper samtidig.
      passordet. Virker hvor som helst; delene lages i CadSHAPE som er åpent i en nettleser.
    - **PC-en på samme wifi:** start CadSHAPE med **START_CADSHAPE_MOBIL.bat**, Fil → **Mål med
      telefonen**, og sikt på QR-koden.
-2. Sikt krysset midt på hullet, 30–80 cm unna. Når målet har vært stødig et sekund, **låses det
-   av seg selv** (kan slås av i innstillingene). ± viser hvor sikkert målet er.
+2. Sikt krysset midt på hullet, mest mulig rett på og med en skarp, godt belyst kant. Små hull
+   må fylle nok av bildet; gå nærmere hvis appen ber om det. Automatisk låsing krever stødig
+   mål, normalt kameraspôr og tilstrekkelig støtte i LiDAR-flaten og bildekanten. En kant fra
+   bare LiDAR låses manuelt. «Anslått avvik» er en konservativ screening, ikke et kalibrert
+   konfidensintervall eller en garanti for presspasning.
 3. Velg *Lokk*, *Plugg*, *Plate* eller *Form*. Har LiDAR sett bunnen av hullet, kan dybden
    brukes med ett trykk. Tallene ligger under *Juster mål* → **Lag i CadSHAPE**.
 4. **Hullmønster** (skruehull i en brakett, et kretskort …): velg *Hullmønster*, sikt på hullene
@@ -59,6 +62,29 @@ Du kan ha inntil 3 slike apper samtidig.
    og høyden, og et *brett* eller en *Gridfinity-boks* med en lomme i tingens form og et grep.
 7. Alt du måler lagres på telefonen med bilde (skuffen øverst til høyre). Er CadSHAPE ikke
    åpent, kan målingen sendes senere. Bildet vises også i CadSHAPE ved siden av delen.
+
+## Kontroll av små hull og presspasning
+
+- Etter låsing: åpne **Kontrollmål for hullet** og oppgi hullets **innvendige diameter** med
+  punktum eller komma. Bruk målet bare når du faktisk har kontrollert hullet. Ikke bruk den
+  printede plastringens innvendige diameter: det er ringens **utvendige** mål som skal passe.
+- Kontrollmålet endrer bare den aktuelle delen; det lagres ikke som en global LiDAR-korreksjon.
+  Et grovt linjalmål er ingen kalibrering av telefonen. Test en kort passformring før et stort lokk.
+- Med 0,4 mm klaring per side gir for eksempel et hull på Ø23,0 mm en krage med ytre Ø22,2 mm.
+- **Del måledata** deler bare tall fra målingen: avstand, vinkel, kantoppløsning og støtte i
+  veggflaten. Ingen bilde- eller tilkoblingsdata følger med. Dette hjelper ved senere feil passform.
+
+Kamera og LiDAR bruker nå primært samme bildes `sceneDepth`. Apples `smoothedSceneDepth`
+er et gjennomsnitt over flere bilder og brukes bare som en markert, grovere reserve.
+Se [sceneDepth](https://developer.apple.com/documentation/arkit/arframe/scenedepth) og
+[smoothedSceneDepth](https://developer.apple.com/documentation/arkit/arframe/smoothedscenedepth).
+En tett punktsky alene er ikke nok: minst 60 % av prøvene må støtte samme plan, og punktene må
+dekke to retninger. Lav oppløsning og repeterbare feil blir ikke gjort nøyaktige av flere like bilder.
+
+Regresjonstestene omfatter nå hull rundt 23 mm, skrå flater, tilfeldige og nesten linjeformede
+dybdepunkter, grove LiDAR-kanter og kontrollmål. Syntetiske tester erstatter ikke en fysisk
+kontrollmåling av telefon, hull og utskrift. Xcode-bygg og installasjon av ny IPA kreves før
+en allerede installert iPhone-app bruker endringene.
 
 ## Slik er appen bygd
 

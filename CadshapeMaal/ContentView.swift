@@ -269,7 +269,7 @@ struct SizeHeader: View {
                 if busy { ProgressView() } else if let label { Text(label).font(.caption.weight(.semibold)).opacity(0.7) }
             }
             if let sure {
-                Label(unsure ? "\(sure) – usikkert, gå nærmere og hold stille" : sure, systemImage: unsure ? "exclamationmark.triangle.fill" : "scope")
+                Label(unsure ? "\(sure) – kontrollmål anbefales" : sure, systemImage: unsure ? "exclamationmark.triangle.fill" : "scope")
                     .font(.footnote.weight(.semibold))
                     .foregroundStyle(unsure ? accent : Color.white.opacity(0.75))
             }
@@ -373,6 +373,7 @@ struct ChoiceCard: View {
 struct LockedContent: View {
     @ObservedObject var model: MeasureModel
     @State private var adjust = false
+    @State private var control = ""
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -393,6 +394,37 @@ struct LockedContent: View {
                     }
                 } label: {
                     Label(model.forcedKind?.short ?? "Form", systemImage: "slider.horizontal.3").font(.footnote.weight(.semibold))
+                }
+            }
+            if let diameter = model.shape?.diameter {
+                DisclosureGroup("Kontrollmål for hullet") {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("Oppgi hullets innvendige diameter, ikke innsiden av den printede plastringen. Endrer bare dette hullet.")
+                            .font(.footnote).opacity(0.8)
+                        HStack {
+                            TextField("Diameter i mm", text: $control)
+                                .keyboardType(.decimalPad)
+                                .textFieldStyle(.roundedBorder)
+                                .accessibilityLabel("Hullets innvendige diameter (mm)")
+                            Button("Bruk målet") { model.useControlDiameter(control) }
+                                .disabled(controlDiameter(control) == nil || model.working)
+                        }
+                        if let d = model.controlDiameterMM {
+                            Text("Kontrollmål brukt: Ø \(mm(d)) mm. Kontroller passformen med en liten prøvebit.")
+                                .font(.footnote)
+                        }
+                        if let evidence = model.diagnosticsText {
+                            ShareLink(item: evidence) { Label("Del måledata", systemImage: "square.and.arrow.up") }
+                                .font(.footnote)
+                        }
+                    }
+                    .padding(.top, 6)
+                }
+                .tint(.white)
+                if model.make == .lokk || model.make == .plugg {
+                    let outer = diameter - 2 * (model.params[.clearance] ?? ParamKey.clearance.defaultValue)
+                    Text("Hull Ø \(mm(diameter)) → \(model.make == .lokk ? "kragens" : "pluggens") ytre diameter Ø \(mm(outer)) mm")
+                        .font(.footnote).opacity(0.8)
                 }
             }
             if let depth = model.depthMM {
@@ -608,7 +640,8 @@ struct SavedSheet: View {
     private func subtitle(_ m: SavedMeasurement) -> String {
         var parts = [m.date.formatted(date: .abbreviated, time: .shortened)]
         if let make = m.makeLabel { parts.append(make) }
-        if let u = m.uncertainty { parts.append("± \(mm(u)) mm") }
+        if let d = m.controlDiameterMM { parts.append("kontrollmål Ø \(mm(d)) mm") }
+        else if let u = m.uncertainty { parts.append("anslått ± \(mm(u)) mm") }
         parts.append(m.sentAt == nil ? "venter" : "laget")
         return parts.joined(separator: " · ")
     }
@@ -743,10 +776,10 @@ struct SettingsSheet: View {
                 } header: {
                     Text("Måling")
                 } footer: {
-                    Text("Låser etter ett stødig sekund (i hullmønster: legger hullet til). Du kan alltid måle på nytt.")
+                    Text("Låser bare når bildene er stødige, kamerasporet er normalt og oppløsningen er god nok. En grov LiDAR-kant låses manuelt og bør kontrolleres før presspasning.")
                 }
                 Section("Slik måler appen") {
-                    Text("Kanten på hullet finnes i kamerabildet (eller i LiDAR-dybden når hullet ikke skiller seg ut). LiDAR måler flaten rundt hullet – avstand og vinkel – og kanten legges ned på flaten i millimeter. ± viser hvor sikkert målet er. LiDAR ser også hvor dypt hullet er.")
+                    Text("Kanten på hullet finnes i kamerabildet (eller i LiDAR-dybden når hullet ikke skiller seg ut). LiDAR måler flaten rundt hullet – avstand og vinkel – og kanten legges ned på flaten i millimeter. Anslått avvik tar med variasjon, pikseloppløsning og flaten. Det er ikke en kalibrert garanti for passform. Bruk kontrollmål for små, trange hull. LiDAR kan også anslå dybden.")
                         .font(.footnote)
                     Text("Best resultat: 30–80 cm unna, mest mulig rett på, godt lys og hele kanten i bildet.")
                         .font(.footnote)

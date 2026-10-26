@@ -65,6 +65,7 @@ final class MeasureModel: ObservableObject {
     @Published var steadiness = 0.0
     /// ± mm: how sure the size is (spread of the last frames + what the distance allows).
     @Published var uncertainty: Double?
+    @Published var controlDiameterMM: Double?
     /// Depth of the hole from LiDAR (mm), median of the last frames.
     @Published var depthMM: Double?
     @Published var answer: ShapeAnswer?
@@ -110,6 +111,9 @@ final class MeasureModel: ObservableObject {
     private var client: CadshapeClient?
     private var history: [FrameMeasurement] = []
     private var lockedOutline: [P2] = []
+    private var trackingNormal = false
+    private var quality = measurementQuality([], trackingNormal: false)
+    private var lockedDiagnostics: MeasurementDiagnostics?
     private var lastWorld: (centre: SIMD3<Float>, normal: SIMD3<Float>)?
     private var steadySince: Date?
     private var sending = false
@@ -214,6 +218,8 @@ final class MeasureModel: ObservableObject {
         if locked || patternLocked || mode.isSpace { return }
         switch r {
         case .success(let m):
+            if case .normal = tracking { trackingNormal = true } else { trackingNormal = false }
+            if !trackingNormal { history = []; steadySince = nil }
             history.append(m)
             if history.count > 12 { history.removeFirst(history.count - 12) }
             live = m
@@ -224,15 +230,15 @@ final class MeasureModel: ObservableObject {
             sendLive()
             checkAuto()
         case .failure(let f):
-            if !history.isEmpty { history.removeFirst() }
-            if history.isEmpty {
-                live = nil
-                answer = nil
-                steadiness = 0
-                uncertainty = nil
-                depthMM = nil
-                lastWorld = nil
-            }
+            // A missing current observation must not leave a previous hole available to lock.
+            history = []
+            live = nil
+            answer = nil
+            steadiness = 0
+            uncertainty = nil
+            depthMM = nil
+            lastWorld = nil
+            quality = measurementQuality([], trackingNormal: false)
             steadySince = nil
             outlineOnScreen = []
             switch f {
@@ -250,37 +256,28 @@ final class MeasureModel: ObservableObject {
     }
 
     private func advice(_ m: FrameMeasurement, tracking: ARCamera.TrackingState) -> String {
-        if case .limited = tracking { return "Beveg telefonen rolig litt – kameraet finner rommet." }
-        if m.plane.distance > 2.0 { return "Gå nærmere – under 1 m gir best mål." }
+        switch tracking {
+        case .normal: break
+        default: return "Beveg telefonen rolig litt – kameraet finner rommet."
+        }
+        if m.plane.distance > 1.0 { return "Gå nærmere – under 1 m gir best mål." }
         if m.plane.distance < 0.15 { return "Litt lenger unna – hele kanten rundt hullet må synes." }
-        if m.plane.tilt > 55 { return "Hold telefonen mer rett mot flaten." }
+        if m.plane.tilt > 35 { return "Hold telefonen mer rett mot flaten." }
         if mode == .pattern, isInPattern() { return "Dette hullet er allerede med. Sikt på neste." }
-        if m.source == .depth { return "Kanten er funnet med LiDAR (hullet skiller seg lite ut i bildet)." }
+        if m.source == .depth { return "Grov LiDAR-kant – lås manuelt og bruk kontrollmål før presspasning." }
+        if m.edgePixels < 48 { return "Hullet er lite i bildet. Gå nærmere med hele kanten synlig og skarp." }
+        if !quality.canAutoLock && (uncertainty ?? .infinity) > 0.5 { return "For usikkert for presspasning. Gå nærmere eller bruk kontrollmål etter låsing." }
         if steadiness < 0.7 { return "Hold stille …" }
+        if autoLock && !quality.canAutoLock { return "Stødig bilde, men ikke godt nok målegrunnlag. Lås manuelt og bruk kontrollmål." }
         if mode == .pattern { return autoLock ? "Stødig – legges til …" : "Stødig – trykk «Legg til hull»." }
         return autoLock ? "Stødig – låser …" : "Stødig – trykk «Lås målet»."
     }
 
     private func updateSteadiness() {
         let recent = history.suffix(8)
-        let sizes = recent.map(\.sizeMM).sorted()
-        guard sizes.count >= 3 else {
-            steadiness = 0
-            uncertainty = nil
-            return
-        }
-        let med = sizes[sizes.count / 2]
-        let dev = sizes.map { abs($0 - med) }.sorted()[sizes.count / 2]
-        let rel = dev / max(1e-6, med)
-        steadiness = max(0, min(1, 1 - rel / 0.02)) * min(1, Double(sizes.count) / 6)
-        // ±: the spread of the width over the last frames (1,5 × the median deviation), plus what
-        // the surface allows – LiDAR's plane is good to a few tenths of a percent, ARKit's guess
-        // to a couple of percent.
-        let widths = recent.map(\.widthMM).sorted()
-        let wm = widths[widths.count / 2]
-        let wdev = widths.map { abs($0 - wm) }.sorted()[widths.count / 2]
-        let surface = (recent.last?.planePoints ?? 0) > 0 ? 0.004 : 0.02
-        uncertainty = max(0.2, 1.5 * wdev + wm * surface)
+        quality = measurementQuality(Array(recent), trackingNormal: trackingNormal)
+        steadiness = quality.steadiness
+        uncertainty = quality.uncertaintyMM
         let depths = recent.compactMap(\.depthMM).sorted()
         depthMM = depths.count >= 3 ? depths[depths.count / 2] : nil
     }
@@ -303,9 +300,18 @@ final class MeasureModel: ObservableObject {
     }
 
     /// «± 0,3 mm» (nil before there is a steady measurement).
-    var uncertaintyText: String? { uncertainty.map { "± \(mm($0)) mm" } }
+    var uncertaintyText: String? { controlDiameterMM == nil ? uncertainty.map { "Anslått avvik: ± \(mm($0)) mm" } : nil }
     /// The measurement is too unsure to rely on for a tight fit.
-    var unsure: Bool { (uncertainty ?? 0) > 1.5 }
+    var unsure: Bool { controlDiameterMM == nil && (uncertainty ?? .infinity) > 0.5 }
+
+    /// User-initiated sharing of numeric measurement evidence; no photo or connection details.
+    var diagnosticsText: String? {
+        guard let diagnostics = lockedDiagnostics else { return nil }
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        guard let data = try? encoder.encode(diagnostics) else { return nil }
+        return String(data: data, encoding: .utf8)
+    }
 
     private func sendLive() {
         if isDemo, let rep = representative() {
@@ -327,7 +333,7 @@ final class MeasureModel: ObservableObject {
 
     /// Locks (one hole) or adds the hole (pattern) by itself once steady for a second.
     private func checkAuto() {
-        guard autoLock, steadiness >= 0.85, live != nil, !working else {
+        guard autoLock, quality.canAutoLock, live != nil, !working else {
             steadySince = nil
             return
         }
@@ -351,14 +357,16 @@ final class MeasureModel: ObservableObject {
 
     // MARK: Locking and making
 
-    var canLock: Bool { live != nil && !locked }
+    var canLock: Bool { live != nil && trackingNormal && !locked }
 
     func lock(byItself: Bool = false) {
-        guard let rep = representative() else { return }
+        guard canLock, (!byItself || quality.canAutoLock), let rep = representative() else { return }
         haptic.notificationOccurred(.success)
         locked = true
         lockedByItself = byItself
         lockedOutline = rep.outlineMM
+        controlDiameterMM = nil
+        lockedDiagnostics = MeasurementDiagnostics(rep, uncertaintyMM: uncertainty)
         outlineOnScreen = []
         done = nil
         error = nil
@@ -410,10 +418,13 @@ final class MeasureModel: ObservableObject {
                 $0.make = make
                 $0.params = p
                 $0.text = shape.text
+                $0.uncertainty = controlDiameterMM == nil ? uncertainty : nil
+                $0.diagnostics = lockedDiagnostics
+                $0.controlDiameterMM = controlDiameterMM
             }
             return
         }
-        savedId = store.add(SavedMeasurement(shape: shape, make: make, params: p, text: shape.text, uncertainty: uncertainty, depthMM: depthMM), image: picture)
+        savedId = store.add(SavedMeasurement(shape: shape, make: make, params: p, text: shape.text, uncertainty: controlDiameterMM == nil ? uncertainty : nil, depthMM: depthMM, diagnostics: lockedDiagnostics, controlDiameterMM: controlDiameterMM), image: picture)
     }
 
     /// Without the PC: a circle when the outline is round, else the outer size.
@@ -430,12 +441,24 @@ final class MeasureModel: ObservableObject {
     }
 
     private func kindChanged() {
+        controlDiameterMM = nil
         if locked { fitLocked() } else { lastSent = .distantPast }
     }
 
     func useStandard(_ d: Double) {
+        controlDiameterMM = nil
         shape = .circle(d: d)
         settingsChanged()
+    }
+
+    @discardableResult
+    func useControlDiameter(_ text: String) -> Bool {
+        guard locked, !working, let d = controlDiameter(text) else { return false }
+        shape = .circle(d: d)
+        controlDiameterMM = d
+        error = nil
+        settingsChanged()
+        return true
     }
 
     func useDepth() {
@@ -500,6 +523,10 @@ final class MeasureModel: ObservableObject {
         depthMM = nil
         steadySince = nil
         savedId = nil
+        controlDiameterMM = nil
+        lockedDiagnostics = nil
+        trackingNormal = false
+        quality = measurementQuality([], trackingNormal: false)
         resumeCamera?()
         client?.clear()
     }
@@ -528,11 +555,11 @@ final class MeasureModel: ObservableObject {
         return pattern.contains { simd_distance($0.world, w.centre) < near }
     }
 
-    var canAddHole: Bool { live != nil && lastWorld != nil && !isInPattern() && !patternLocked }
+    var canAddHole: Bool { trackingNormal && live != nil && lastWorld != nil && !isInPattern() && !patternLocked }
 
     /// Adds the hole in the cross-hair to the pattern.
     func addHole() {
-        guard let w = lastWorld, let rep = representative(), !isInPattern() else { return }
+        guard canAddHole, let w = lastWorld, let rep = representative(), !isInPattern() else { return }
         tap.impactOccurred()
         let s = answer?.shape ?? localShape(rep.outlineMM)
         pattern.append(PatternEntry(world: w.centre, normal: w.normal, shape: s))

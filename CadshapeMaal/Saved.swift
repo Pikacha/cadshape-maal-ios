@@ -1,4 +1,5 @@
 import Foundation
+import HoleKit
 import Security
 import UIKit
 
@@ -56,6 +57,9 @@ struct SavedMeasurement: Codable, Identifiable, Equatable {
     /// ± mm, how sure the measurement is.
     var uncertainty: Double?
     var depthMM: Double?
+    /// Numeric evidence from the camera measurement, retained if a control dimension replaces it.
+    var diagnostics: MeasurementDiagnostics?
+    var controlDiameterMM: Double?
     /// File name of the picture next to the list (Documents/maalinger/).
     var photo: String?
     /// Made in CadSHAPE (and when).
