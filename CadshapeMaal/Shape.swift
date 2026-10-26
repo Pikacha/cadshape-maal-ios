@@ -189,3 +189,48 @@ let standardHoles: [Double] = [
 func nearStandard(_ d: Double) -> [Double] {
     Array(standardHoles.filter { abs($0 - d) <= d * 0.05 }.sorted { abs($0 - d) < abs($1 - d) }.prefix(3))
 }
+
+/// What to make from a pattern of holes (src/core/measured-holes.ts on the PC).
+enum HolesMake: String, CaseIterable, Identifiable, Codable {
+    case plate, holes
+    var id: String { rawValue }
+    var label: String {
+        switch self {
+        case .plate: return "Plate med hull"
+        case .holes: return "Bare hullene"
+        }
+    }
+    var hint: String {
+        switch self {
+        case .plate: return "Monteringsplate med hullene på riktig sted – skruene går rett gjennom"
+        case .holes: return "Hullene som en hullgruppe du kan legge på en egen del"
+        }
+    }
+    var symbol: String {
+        switch self {
+        case .plate: return "rectangle.dashed.and.paperclip"
+        case .holes: return "circle.grid.2x2"
+        }
+    }
+    var uses: [ParamKey] {
+        switch self {
+        case .plate: return [.thickness, .margin, .clearance]
+        case .holes: return [.clearance]
+        }
+    }
+}
+
+/// Starting values for a pattern (screws need a little play; the plate a smaller border).
+let holesDefaults: [ParamKey: Double] = [.thickness: 3, .margin: 8, .clearance: 0.3]
+
+extension MakeKind {
+    /// Picture for the choice cards.
+    var symbol: String {
+        switch self {
+        case .lokk: return "circle.circle"
+        case .plugg: return "smallcircle.filled.circle"
+        case .plate: return "square"
+        case .form: return "square.dashed"
+        }
+    }
+}

@@ -4,15 +4,33 @@ import Foundation
 import HoleKit
 import UIKit
 
+/// What is measured: one hole, or a pattern of holes (screw holes) with their places.
+enum MeasureMode: String, CaseIterable, Identifiable {
+    case single, pattern
+    var id: String { rawValue }
+    var label: String { self == .single ? "Ett hull" : "Hullmønster" }
+}
+
+/// A hole added to the pattern: where it is in the room and its shape.
+struct PatternEntry: Identifiable {
+    let id = UUID()
+    /// Middle of the hole in ARKit's world coordinates (m).
+    var world: SIMD3<Float>
+    /// The surface's normal there, world coordinates, pointing into the wall.
+    var normal: SIMD3<Float>
+    var shape: MeasuredShape
+}
+
 /// Everything the screen shows. Changed on the main thread only.
 final class MeasureModel: ObservableObject {
-    // The PC
+    // The PC (or CadSHAPE on the web)
     @Published var pairing: Pairing?
     @Published var wantsPairing = false
-    /// nil = not asked yet / no contact, true = CadSHAPE is open on the PC.
+    /// nil = not asked yet / no contact, true = CadSHAPE is open (on the PC or in a browser).
     @Published var pcOpen: Bool?
     @Published var connectionError: String?
     @Published var showSettings = false
+    @Published var showSaved = false
 
     // The camera
     @Published var hasLidar = false
@@ -20,17 +38,29 @@ final class MeasureModel: ObservableObject {
     @Published var hint = "Sikt krysset midt på hullet"
 
     // Live measuring
+    @Published var mode: MeasureMode = .single {
+        didSet { if oldValue != mode { modeChanged() } }
+    }
     @Published var outlineOnScreen: [CGPoint] = []
     @Published var live: FrameMeasurement?
     /// 0…1: how much the last frames agree.
     @Published var steadiness = 0.0
+    /// ± mm: how sure the size is (spread of the last frames + what the distance allows).
+    @Published var uncertainty: Double?
+    /// Depth of the hole from LiDAR (mm), median of the last frames.
+    @Published var depthMM: Double?
     @Published var answer: ShapeAnswer?
     @Published var forcedKind: ShapeKind? {
         didSet { if oldValue != forcedKind { kindChanged() } }
     }
+    /// Lock by itself once the measurement has been steady for a second.
+    @Published var autoLock: Bool = UserDefaults.standard.object(forKey: "autoLock") as? Bool ?? true {
+        didSet { UserDefaults.standard.set(autoLock, forKey: "autoLock") }
+    }
 
     // After locking
     @Published var locked = false
+    @Published var lockedByItself = false
     @Published var shape: MeasuredShape?
     @Published var make: MakeKind = .lokk {
         didSet { if oldValue != make { settingsChanged() } }
@@ -40,14 +70,34 @@ final class MeasureModel: ObservableObject {
     @Published var done: String?
     @Published var error: String?
 
+    // Hole pattern
+    @Published var pattern: [PatternEntry] = []
+    /// The pattern's holes on screen (numbered markers), updated with the camera.
+    @Published var patternOnScreen: [CGPoint?] = []
+    @Published var patternLocked = false
+    @Published var holesMake: HolesMake = .plate
+    @Published var holesParams: [ParamKey: Double] = holesDefaults
+
+    let store = MeasurementStore()
+    /// The measurement saved on the phone for the locked hole or pattern.
+    private(set) var savedId: UUID?
+
+    /// Set by the camera view: a picture of what the camera sees now, and pausing the camera.
+    var snapshot: (() -> UIImage?)?
+    var pauseCamera: (() -> Void)?
+    var resumeCamera: (() -> Void)?
+
     private var client: CadshapeClient?
     private var history: [FrameMeasurement] = []
     private var lockedOutline: [P2] = []
+    private var lastWorld: (centre: SIMD3<Float>, normal: SIMD3<Float>)?
+    private var steadySince: Date?
     private var sending = false
     private var lastSent = Date.distantPast
     private var statusTimer: Timer?
     private var previewWork: DispatchWorkItem?
     private let haptic = UINotificationFeedbackGenerator()
+    private let tap = UIImpactFeedbackGenerator(style: .medium)
 
     /// Demo (simulator screenshots, `-demo live`): a made-up ceiling instead of the camera, no PC.
     let demo: String? = UserDefaults.standard.string(forKey: "demo")
@@ -60,10 +110,22 @@ final class MeasureModel: ObservableObject {
             return
         }
         if let p = Pairing.load() { connect(p) } else { wantsPairing = true }
-        statusTimer = Timer.scheduledTimer(withTimeInterval: 4, repeats: true) { [weak self] _ in self?.checkPc() }
+        startChecking()
     }
 
     // MARK: The PC
+
+    /// Checks every few seconds whether CadSHAPE is open – only while the app is on screen.
+    func startChecking() {
+        guard !isDemo, statusTimer == nil else { return }
+        statusTimer = Timer.scheduledTimer(withTimeInterval: 5, repeats: true) { [weak self] _ in self?.checkPc() }
+        checkPc()
+    }
+
+    func stopChecking() {
+        statusTimer?.invalidate()
+        statusTimer = nil
+    }
 
     /// A QR code from CadSHAPE was seen (again: a fresh start, the PC may have a new certificate).
     func paired(_ p: Pairing) {
@@ -72,6 +134,12 @@ final class MeasureModel: ObservableObject {
         connect(p)
         wantsPairing = false
         showSettings = false
+    }
+
+    /// Logged in to CadSHAPE on the web.
+    func loggedIn(base: URL, session: String) {
+        Keychain.save(session, account: base.absoluteString)
+        paired(.web(base))
     }
 
     private func connect(_ p: Pairing) {
@@ -108,7 +176,8 @@ final class MeasureModel: ObservableObject {
             switch r {
             case .success(let open):
                 self.pcOpen = open
-                self.connectionError = open ? nil : "CadSHAPE er ikke åpent i nettleseren på PC-en."
+                let online = self.pairing?.isOnline == true
+                self.connectionError = open ? nil : (online ? "CadSHAPE er ikke åpent i noen nettleser. Åpne \(self.pairing?.hostLabel ?? "CadSHAPE") på PC-en." : "CadSHAPE er ikke åpent i nettleseren på PC-en.")
             case .failure(let e):
                 self.pcOpen = nil
                 self.connectionError = e.message
@@ -120,30 +189,43 @@ final class MeasureModel: ObservableObject {
 
     // MARK: Live measuring
 
-    func measured(_ r: Result<FrameMeasurement, MeasureFailure>, toScreen: (P2) -> CGPoint, tracking: ARCamera.TrackingState) {
-        if locked { return }
+    func measured(_ r: Result<FrameMeasurement, MeasureFailure>, toScreen: (P2) -> CGPoint, tracking: ARCamera.TrackingState, cameraToWorld: simd_float4x4? = nil) {
+        if locked || patternLocked { return }
         switch r {
         case .success(let m):
             history.append(m)
             if history.count > 12 { history.removeFirst(history.count - 12) }
             live = m
             outlineOnScreen = m.outline.map(toScreen)
+            if let t = cameraToWorld { lastWorld = toWorld(m, t) }
             updateSteadiness()
             hint = advice(m, tracking: tracking)
             sendLive()
+            checkAuto()
         case .failure(let f):
             if !history.isEmpty { history.removeFirst() }
             if history.isEmpty {
                 live = nil
                 answer = nil
                 steadiness = 0
+                uncertainty = nil
+                depthMM = nil
+                lastWorld = nil
             }
+            steadySince = nil
             outlineOnScreen = []
             switch f {
-            case .noHole: hint = "Finner ikke noe hull i krysset. Sikt midt på hullet, 30–100 cm unna."
+            case .noHole: hint = mode == .pattern && !pattern.isEmpty ? "Sikt på neste hull." : "Finner ikke noe hull i krysset. Sikt midt på hullet, 30–100 cm unna."
             case .noSurface: hint = hasLidar ? "Ser ikke flaten rundt hullet. Gå litt lenger unna så mer av veggen er med." : "Beveg telefonen litt fra side til side så den finner flaten."
             }
         }
+    }
+
+    /// Camera coordinates (x right, y down, z forward) → ARKit world (its camera looks along −z, y up).
+    private func toWorld(_ m: FrameMeasurement, _ t: simd_float4x4) -> (centre: SIMD3<Float>, normal: SIMD3<Float>) {
+        let c = t * SIMD4<Float>(Float(m.centre.x), Float(-m.centre.y), Float(-m.centre.z), 1)
+        let n = t * SIMD4<Float>(Float(m.plane.normal.x), Float(-m.plane.normal.y), Float(-m.plane.normal.z), 0)
+        return (SIMD3(c.x, c.y, c.z), simd_normalize(SIMD3(n.x, n.y, n.z)))
     }
 
     private func advice(_ m: FrameMeasurement, tracking: ARCamera.TrackingState) -> String {
@@ -151,18 +233,35 @@ final class MeasureModel: ObservableObject {
         if m.plane.distance > 2.0 { return "Gå nærmere – under 1 m gir best mål." }
         if m.plane.distance < 0.15 { return "Litt lenger unna – hele kanten rundt hullet må synes." }
         if m.plane.tilt > 55 { return "Hold telefonen mer rett mot flaten." }
+        if mode == .pattern, isInPattern() { return "Dette hullet er allerede med. Sikt på neste." }
         if m.source == .depth { return "Kanten er funnet med LiDAR (hullet skiller seg lite ut i bildet)." }
         if steadiness < 0.7 { return "Hold stille …" }
-        return "Stødig – trykk «Lås målet»."
+        if mode == .pattern { return autoLock ? "Stødig – legges til …" : "Stødig – trykk «Legg til hull»." }
+        return autoLock ? "Stødig – låser …" : "Stødig – trykk «Lås målet»."
     }
 
     private func updateSteadiness() {
-        let sizes = history.suffix(8).map(\.sizeMM).sorted()
-        guard sizes.count >= 3 else { steadiness = 0; return }
+        let recent = history.suffix(8)
+        let sizes = recent.map(\.sizeMM).sorted()
+        guard sizes.count >= 3 else {
+            steadiness = 0
+            uncertainty = nil
+            return
+        }
         let med = sizes[sizes.count / 2]
         let dev = sizes.map { abs($0 - med) }.sorted()[sizes.count / 2]
         let rel = dev / max(1e-6, med)
         steadiness = max(0, min(1, 1 - rel / 0.02)) * min(1, Double(sizes.count) / 6)
+        // ±: the spread of the width over the last frames (1,5 × the median deviation), plus what
+        // the surface allows – LiDAR's plane is good to a few tenths of a percent, ARKit's guess
+        // to a couple of percent.
+        let widths = recent.map(\.widthMM).sorted()
+        let wm = widths[widths.count / 2]
+        let wdev = widths.map { abs($0 - wm) }.sorted()[widths.count / 2]
+        let surface = (recent.last?.planePoints ?? 0) > 0 ? 0.004 : 0.02
+        uncertainty = max(0.2, 1.5 * wdev + wm * surface)
+        let depths = recent.compactMap(\.depthMM).sorted()
+        depthMM = depths.count >= 3 ? depths[depths.count / 2] : nil
     }
 
     /// The frame that best matches the last frames (median size).
@@ -178,9 +277,14 @@ final class MeasureModel: ObservableObject {
     var details: String {
         guard let m = live else { return "" }
         var parts = [String(format: "%.2f m unna", m.plane.distance).replacingOccurrences(of: ".", with: ","), "\(Int(m.plane.tilt.rounded()))° på skrå"]
-        if m.planePoints > 0 { parts.append("flate fra \(m.planePoints) LiDAR-punkter") } else { parts.append("flate fra ARKit") }
+        if let d = depthMM { parts.append("\(Int(d.rounded())) mm dypt") }
         return parts.joined(separator: " · ")
     }
+
+    /// «± 0,3 mm» (nil before there is a steady measurement).
+    var uncertaintyText: String? { uncertainty.map { "± \(mm($0)) mm" } }
+    /// The measurement is too unsure to rely on for a tight fit.
+    var unsure: Bool { (uncertainty ?? 0) > 1.5 }
 
     private func sendLive() {
         if isDemo, let rep = representative() {
@@ -188,10 +292,11 @@ final class MeasureModel: ObservableObject {
             answer = ShapeAnswer(shape: s, text: s.text, label: s.kind.label)
             return
         }
-        guard let client, connected, !sending, Date().timeIntervalSince(lastSent) > 0.35, let rep = representative() else { return }
+        // Three times a second is plenty for the ghost on the PC (and spares the battery).
+        guard let client, connected, !sending, Date().timeIntervalSince(lastSent) > 0.5, let rep = representative() else { return }
         sending = true
         lastSent = Date()
-        client.outline(rep.outlineMM, kind: forcedKind, make: make, params: params, preview: true) { [weak self] r in
+        client.outline(rep.outlineMM, kind: forcedKind, make: make, params: params, preview: mode == .single) { [weak self] r in
             guard let self else { return }
             self.sending = false
             if self.locked { return }
@@ -199,31 +304,62 @@ final class MeasureModel: ObservableObject {
         }
     }
 
+    /// Locks (one hole) or adds the hole (pattern) by itself once steady for a second.
+    private func checkAuto() {
+        guard autoLock, steadiness >= 0.85, live != nil, !working else {
+            steadySince = nil
+            return
+        }
+        if mode == .pattern && isInPattern() {
+            steadySince = nil
+            return
+        }
+        let now = Date()
+        guard let since = steadySince else {
+            steadySince = now
+            return
+        }
+        if now.timeIntervalSince(since) < 1.0 { return }
+        steadySince = nil
+        if mode == .single {
+            lock(byItself: true)
+        } else {
+            addHole()
+        }
+    }
+
     // MARK: Locking and making
 
     var canLock: Bool { live != nil && !locked }
 
-    func lock() {
+    func lock(byItself: Bool = false) {
         guard let rep = representative() else { return }
         haptic.notificationOccurred(.success)
         locked = true
+        lockedByItself = byItself
         lockedOutline = rep.outlineMM
         outlineOnScreen = []
         done = nil
         error = nil
-        fitLocked()
+        // LiDAR saw the bottom: a plug or collar goes as deep as the hole (a little less).
+        if let d = depthMM, d >= 3 { params[.depth] = max(1, (d - 1).rounded()) }
+        let picture = snapshot?()
+        pauseCamera?()
+        fitLocked(picture: picture)
     }
 
-    private func fitLocked() {
+    private func fitLocked(picture: UIImage? = nil) {
         if isDemo {
             let s = localShape(lockedOutline)
             shape = s
             answer = ShapeAnswer(shape: s, text: s.text, label: s.kind.label)
+            saveLocked(picture: picture)
             return
         }
-        guard let client else {
+        guard let client, connected else {
             shape = localShape(lockedOutline)
-            error = "Ikke koblet til PC-en – formen er grovt anslått. Koble til for å lage delen."
+            error = "CadSHAPE er ikke åpent – formen er grovt anslått. Målingen er lagret og kan sendes senere."
+            saveLocked(picture: picture)
             return
         }
         working = true
@@ -239,7 +375,24 @@ final class MeasureModel: ObservableObject {
                 self.shape = self.localShape(self.lockedOutline)
                 self.error = e.message
             }
+            self.saveLocked(picture: picture)
         }
+    }
+
+    /// Keeps the locked measurement on the phone (first time: with the picture; later: new choices).
+    private func saveLocked(picture: UIImage? = nil) {
+        guard let shape else { return }
+        let p = Dictionary(uniqueKeysWithValues: params.map { ($0.key.rawValue, $0.value) })
+        if let id = savedId {
+            store.update(id) {
+                $0.shape = shape
+                $0.make = make
+                $0.params = p
+                $0.text = shape.text
+            }
+            return
+        }
+        savedId = store.add(SavedMeasurement(shape: shape, make: make, params: p, text: shape.text, uncertainty: uncertainty, depthMM: depthMM), image: picture)
     }
 
     /// Without the PC: a circle when the outline is round, else the outer size.
@@ -264,6 +417,11 @@ final class MeasureModel: ObservableObject {
         settingsChanged()
     }
 
+    func useDepth() {
+        guard let d = depthMM else { return }
+        setParam(.depth, max(1, (d - 1).rounded()))
+    }
+
     func setParam(_ k: ParamKey, _ v: Double) {
         params[k] = min(k.range.upperBound, max(k.range.lowerBound, (v / k.step).rounded() * k.step))
         settingsChanged()
@@ -272,6 +430,7 @@ final class MeasureModel: ObservableObject {
     /// Shows the new size/part on the PC, a moment after the last change.
     private func settingsChanged() {
         done = nil
+        if locked { saveLocked() }
         previewWork?.cancel()
         let work = DispatchWorkItem { [weak self] in
             guard let self, let client = self.client, let shape = self.shape, self.locked, self.connected else { return }
@@ -289,22 +448,25 @@ final class MeasureModel: ObservableObject {
         guard let client, let shape else { return }
         working = true
         error = nil
-        client.commit(shape, make: make, params: params) { [weak self] r in
+        let saved = savedId.flatMap { id in store.items.first { $0.id == id } }
+        client.commit(shape, make: make, params: params, photo: saved.flatMap { store.photoData($0) }) { [weak self] r in
             guard let self else { return }
             self.working = false
             switch r {
             case .success(let label):
                 self.haptic.notificationOccurred(.success)
                 self.done = "\(label) er laget i CadSHAPE."
+                if let id = self.savedId { self.store.update(id) { $0.sentAt = Date() } }
             case .failure(let e):
                 self.haptic.notificationOccurred(.error)
-                self.error = e.message
+                self.error = e.message + " Målingen er lagret på telefonen."
             }
         }
     }
 
     func measureAgain() {
         locked = false
+        lockedByItself = false
         shape = nil
         answer = nil
         live = nil
@@ -313,6 +475,181 @@ final class MeasureModel: ObservableObject {
         working = false
         history = []
         steadiness = 0
+        uncertainty = nil
+        depthMM = nil
+        steadySince = nil
+        savedId = nil
+        resumeCamera?()
         client?.clear()
+    }
+
+    // MARK: Hole pattern
+
+    private func modeChanged() {
+        measureAgain()
+        pattern = []
+        patternOnScreen = []
+        patternLocked = false
+    }
+
+    /// The hole in the cross-hair is already in the pattern (its middle is within half its size).
+    func isInPattern() -> Bool {
+        guard let w = lastWorld, let m = live else { return false }
+        let near = Float(max(0.003, m.sizeMM / 1000 * 0.6))
+        return pattern.contains { simd_distance($0.world, w.centre) < near }
+    }
+
+    var canAddHole: Bool { live != nil && lastWorld != nil && !isInPattern() && !patternLocked }
+
+    /// Adds the hole in the cross-hair to the pattern.
+    func addHole() {
+        guard let w = lastWorld, let rep = representative(), !isInPattern() else { return }
+        tap.impactOccurred()
+        let s = answer?.shape ?? localShape(rep.outlineMM)
+        pattern.append(PatternEntry(world: w.centre, normal: w.normal, shape: s))
+        history = []
+        steadiness = 0
+        steadySince = nil
+        hint = "Hull \(pattern.count) er med. Sikt på neste."
+    }
+
+    func undoHole() {
+        if !pattern.isEmpty { pattern.removeLast() }
+    }
+
+    /// The pattern laid flat: mm on the surface, x right and y up as seen from the room. On a wall
+    /// «up» is up; on a ceiling or floor the first two holes give the direction.
+    func patternLayout() -> [PatternHoleOut] {
+        guard pattern.count >= 2 else { return [] }
+        var n = SIMD3<Float>(0, 0, 0)
+        for e in pattern { n += e.normal }
+        n = simd_normalize(n)
+        let toViewer = -n
+        let worldUp = SIMD3<Float>(0, 1, 0)
+        var y: SIMD3<Float>
+        if abs(simd_dot(n, worldUp)) < 0.85 {
+            y = worldUp - n * simd_dot(worldUp, n)
+        } else {
+            let d = pattern[1].world - pattern[0].world
+            y = d - n * simd_dot(d, n)
+        }
+        y = simd_normalize(y)
+        let x = simd_normalize(simd_cross(y, toViewer))
+        let o = pattern[0].world
+        return pattern.map { e in
+            let d = e.world - o
+            return PatternHoleOut(x: Double(simd_dot(d, x)) * 1000, y: Double(simd_dot(d, y)) * 1000, shape: e.shape)
+        }
+    }
+
+    /// Distances between neighbouring holes in the pattern, for the panel (mm).
+    var patternSpacings: [Double] {
+        let l = patternLayout()
+        guard l.count >= 2 else { return [] }
+        return zip(l, l.dropFirst()).map { hypot($1.x - $0.x, $1.y - $0.y) }
+    }
+
+    func finishPattern() {
+        guard pattern.count >= 2 else { return }
+        haptic.notificationOccurred(.success)
+        patternLocked = true
+        outlineOnScreen = []
+        done = nil
+        error = nil
+        let picture = snapshot?()
+        let holes = patternLayout()
+        let p = Dictionary(uniqueKeysWithValues: holesParams.map { ($0.key.rawValue, $0.value) })
+        savedId = store.add(SavedMeasurement(holes: holes, holesMake: holesMake, holesParams: p, text: patternText(holes)), image: picture)
+        pauseCamera?()
+    }
+
+    func patternText(_ holes: [PatternHoleOut]) -> String {
+        let xs = holes.map(\.x), ys = holes.map(\.y)
+        let span = "\(mm((xs.max() ?? 0) - (xs.min() ?? 0))) × \(mm((ys.max() ?? 0) - (ys.min() ?? 0))) mm"
+        let kinds = Set(holes.map { $0.shape.text })
+        return "\(holes.count) hull, \(kinds.count == 1 ? kinds.first! : "ulike størrelser"), \(span)"
+    }
+
+    func setHolesParam(_ k: ParamKey, _ v: Double) {
+        holesParams[k] = min(k.range.upperBound, max(k.range.lowerBound, (v / k.step).rounded() * k.step))
+        if let id = savedId {
+            let p = Dictionary(uniqueKeysWithValues: holesParams.map { ($0.key.rawValue, $0.value) })
+            store.update(id) { $0.holesParams = p }
+        }
+        done = nil
+    }
+
+    func setHolesMake(_ m: HolesMake) {
+        holesMake = m
+        if let id = savedId { store.update(id) { $0.holesMake = m } }
+        done = nil
+    }
+
+    func commitPattern() {
+        if isDemo {
+            done = "\(holesMake.label) er laget i CadSHAPE (demo)."
+            return
+        }
+        guard let client else { return }
+        working = true
+        error = nil
+        let saved = savedId.flatMap { id in store.items.first { $0.id == id } }
+        client.holes(patternLayout(), make: holesMake, params: holesParams, photo: saved.flatMap { store.photoData($0) }) { [weak self] r in
+            guard let self else { return }
+            self.working = false
+            switch r {
+            case .success(let label):
+                self.haptic.notificationOccurred(.success)
+                self.done = "\(label) er laget i CadSHAPE."
+                if let id = self.savedId { self.store.update(id) { $0.sentAt = Date() } }
+            case .failure(let e):
+                self.haptic.notificationOccurred(.error)
+                self.error = e.message + " Mønsteret er lagret på telefonen."
+            }
+        }
+    }
+
+    func newPattern() {
+        pattern = []
+        patternOnScreen = []
+        patternLocked = false
+        savedId = nil
+        done = nil
+        error = nil
+        history = []
+        steadiness = 0
+        resumeCamera?()
+    }
+
+    // MARK: Saved measurements
+
+    /// Sends a measurement kept on the phone to CadSHAPE.
+    func send(_ m: SavedMeasurement, done: @escaping (String?) -> Void) {
+        guard let client, connected else { return done("CadSHAPE er ikke åpent.") }
+        let photo = store.photoData(m)
+        let finish: (Result<String, ClientError>) -> Void = { [weak self] r in
+            switch r {
+            case .success:
+                self?.store.update(m.id) { $0.sentAt = Date() }
+                done(nil)
+            case .failure(let e):
+                done(e.message)
+            }
+        }
+        if let holes = m.holes {
+            let p = paramDict(m.holesParams, defaults: holesDefaults)
+            client.holes(holes, make: m.holesMake ?? .plate, params: p, photo: photo, done: finish)
+        } else if let shape = m.shape {
+            let defaults = Dictionary(uniqueKeysWithValues: ParamKey.allCases.map { ($0, $0.defaultValue) })
+            client.commit(shape, make: m.make ?? .lokk, params: paramDict(m.params, defaults: defaults), photo: photo, done: finish)
+        } else {
+            done("Målingen er tom.")
+        }
+    }
+
+    private func paramDict(_ raw: [String: Double]?, defaults: [ParamKey: Double]) -> [ParamKey: Double] {
+        var out = defaults
+        for (k, v) in raw ?? [:] { if let key = ParamKey(rawValue: k) { out[key] = v } }
+        return out
     }
 }

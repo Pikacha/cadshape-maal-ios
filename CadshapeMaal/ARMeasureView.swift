@@ -1,5 +1,6 @@
 import ARKit
 import HoleKit
+import SceneKit
 import SwiftUI
 import Vision
 
@@ -16,6 +17,10 @@ struct ARMeasureView: UIViewRepresentable {
         view.session.delegate = context.coordinator
         context.coordinator.view = view
         context.coordinator.start()
+        // A picture for the saved measurement, and the camera paused while a measurement is locked.
+        model.snapshot = { [weak view] in view?.snapshot() }
+        model.pauseCamera = { [weak view] in view?.session.pause() }
+        model.resumeCamera = { [weak coordinator = context.coordinator] in coordinator?.resume() }
         return view
     }
 
@@ -34,10 +39,19 @@ final class Measurer: NSObject, ARSessionDelegate {
     /// Main thread only.
     private var busy = false
     private var last: TimeInterval = 0
+    private var lastProjected: TimeInterval = 0
 
     init(model: MeasureModel) {
         self.model = model
         super.init()
+    }
+
+    private var config: ARWorldTrackingConfiguration?
+
+    /// Goes on after a pause, in the same room (the hole pattern keeps its places).
+    func resume() {
+        guard let view, let config else { return }
+        view.session.run(config)
     }
 
     func start() {
@@ -46,6 +60,7 @@ final class Measurer: NSObject, ARSessionDelegate {
             return
         }
         let config = ARWorldTrackingConfiguration()
+        self.config = config
         config.planeDetection = [.horizontal, .vertical]
         config.isAutoFocusEnabled = true
         if ARWorldTrackingConfiguration.supportsFrameSemantics(.smoothedSceneDepth) {
@@ -62,6 +77,14 @@ final class Measurer: NSObject, ARSessionDelegate {
     }
 
     func session(_ session: ARSession, didUpdate frame: ARFrame) {
+        // The pattern's holes follow the camera on screen.
+        if let view, !model.pattern.isEmpty, frame.timestamp - lastProjected > 0.05 {
+            lastProjected = frame.timestamp
+            model.patternOnScreen = model.pattern.map { e in
+                let p = view.projectPoint(SCNVector3(e.world.x, e.world.y, e.world.z))
+                return p.z > 0 && p.z < 1 ? CGPoint(x: CGFloat(p.x), y: CGFloat(p.y)) : nil
+            }
+        }
         if busy || frame.timestamp - last < 0.12 { return }
         guard let view = view, view.bounds.width > 0 else { return }
         busy = true
@@ -73,6 +96,7 @@ final class Measurer: NSObject, ARSessionDelegate {
         let pairing = model.wantsPairing
         let measuring = !model.locked && !pairing
         let tracking = frame.camera.trackingState
+        let cameraToWorld = frame.camera.transform
         let imageWidth = Double(frame.camera.imageResolution.width)
         var fallback: Plane? = nil
         if measuring && frame.smoothedSceneDepth == nil && frame.sceneDepth == nil {
@@ -108,7 +132,7 @@ final class Measurer: NSObject, ARSessionDelegate {
                     let n = CGPoint(x: p.x / w, y: p.y / h).applying(toView)
                     return CGPoint(x: n.x * viewSize.width, y: n.y * viewSize.height)
                 }
-                self.model.measured(result, toScreen: toScreen, tracking: tracking)
+                self.model.measured(result, toScreen: toScreen, tracking: tracking, cameraToWorld: cameraToWorld)
             }
         }
     }

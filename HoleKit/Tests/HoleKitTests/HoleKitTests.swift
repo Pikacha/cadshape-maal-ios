@@ -180,6 +180,26 @@ final class HoleKitTests: XCTestCase {
         XCTAssertTrue(quickText(m).hasPrefix("Ø "), quickText(m))
     }
 
+    func testDepthAndCentreOfHole() {
+        let scene = Scene(tiltDegrees: 0, distance: 0.7, radius: 0.04)
+        let input = FrameInput(gray: scene.picture(), scale: 2, intrinsics: scene.K, depth: scene.depth(), fallbackPlane: nil, seed: scene.seed)
+        guard case .success(let m) = measureFrame(input) else { return XCTFail("no measurement") }
+        // The scene's hole is 0,1 m deeper (along z); straight out from the wall that is 0,1 · |n.z|.
+        guard let depth = m.depthMM else { return XCTFail("no depth") }
+        XCTAssertEqual(depth, 100 * abs(scene.plane.normal.z), accuracy: 6)
+        XCTAssertEqual(vlength(m.centre - scene.centre), 0, accuracy: 0.002)
+
+        // A hole that only shows in the depth map gets its depth too.
+        let flat = FrameInput(gray: scene.picture(hole: 205, wall: 205), scale: 2, intrinsics: scene.K, depth: scene.depth(), fallbackPlane: nil, seed: scene.seed)
+        guard case .success(let d) = measureFrame(flat) else { return XCTFail("no depth hole") }
+        XCTAssertNotNil(d.depthMM)
+
+        // Without LiDAR: no depth.
+        let noLidar = FrameInput(gray: scene.picture(), scale: 2, intrinsics: scene.K, depth: nil, fallbackPlane: scene.plane, seed: scene.seed)
+        guard case .success(let n) = measureFrame(noLidar) else { return XCTFail("no measurement") }
+        XCTAssertNil(n.depthMM)
+    }
+
     private func check(_ scene: Scene, picture: GrayImage? = nil, source: HoleSource, tolerance: Double, file: StaticString = #filePath, line: UInt = #line) {
         let input = FrameInput(gray: picture ?? scene.picture(), scale: 2, intrinsics: scene.K, depth: scene.depth(), fallbackPlane: nil, seed: scene.seed)
         let r = measureFrame(input)

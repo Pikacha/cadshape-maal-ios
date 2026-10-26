@@ -9,7 +9,7 @@ Mål et hull i vegg eller tak med iPhone-kameraet og LiDAR, og få det tegnet re
   plan-tilpasning), så det spiller ingen rolle om du står litt på skrå.
 - **Formen** (rund, firkantet med runde hjørner eller fri) tilpasses av CadSHAPE på PC-en, med
   samme kode som nettsiden, og vises der mens du måler.
-- Ingen konto, ingen sky: appen snakker bare med din egen PC på samme wifi.
+- Ingen sky utenom din egen: appen snakker med PC-en på samme wifi, eller med din egen CadSHAPE på nett.
 
 Krever iPhone med LiDAR (12 Pro / 13 Pro / 14 Pro / 15 Pro / 16 Pro …) for best resultat. Uten
 LiDAR brukes ARKit sitt anslag av flaten (grovere).
@@ -37,12 +37,20 @@ Du kan ha inntil 3 slike apper samtidig.
 
 ## Bruk
 
-1. Start CadSHAPE på PC-en med **START_CADSHAPE_MOBIL.bat**.
-2. I CadSHAPE: **Fil → Mål med telefonen / åpne på mobil**.
-3. Åpne appen og sikt på QR-koden – den kobler seg til av seg selv (husker PC-en senere).
-4. Sikt krysset midt på hullet, 30–80 cm unna. Hold stille til streken blir **grønn**.
-5. **Lås målet** → velg *Lokk*, *Plugg*, *Plate* eller *Form*, juster mål, eventuelt
-   standardstørrelse (hullsag/downlight) → **Lag i CadSHAPE**.
+1. Koble til CadSHAPE på én av to måter:
+   - **På nett:** innstillinger → *CadSHAPE på nett* → adressen (f.eks. `kloki.no/cadshape`) og
+     passordet. Virker hvor som helst; delene lages i CadSHAPE som er åpent i en nettleser.
+   - **PC-en på samme wifi:** start CadSHAPE med **START_CADSHAPE_MOBIL.bat**, Fil → **Mål med
+     telefonen**, og sikt på QR-koden.
+2. Sikt krysset midt på hullet, 30–80 cm unna. Når målet har vært stødig et sekund, **låses det
+   av seg selv** (kan slås av i innstillingene). ± viser hvor sikkert målet er.
+3. Velg *Lokk*, *Plugg*, *Plate* eller *Form*. Har LiDAR sett bunnen av hullet, kan dybden
+   brukes med ett trykk. Tallene ligger under *Juster mål* → **Lag i CadSHAPE**.
+4. **Hullmønster** (skruehull i en brakett, et kretskort …): velg *Hullmønster*, sikt på hullene
+   ett for ett – hvert hull legges til når det er stødig og får et nummer i bildet – og trykk
+   *Ferdig*. Du får en plate med hullene på riktig sted, eller bare hullene.
+5. Alt du måler lagres på telefonen med bilde (skuffen øverst til høyre). Er CadSHAPE ikke
+   åpent, kan målingen sendes senere. Bildet vises også i CadSHAPE ved siden av delen.
 
 ## Slik er appen bygd
 
