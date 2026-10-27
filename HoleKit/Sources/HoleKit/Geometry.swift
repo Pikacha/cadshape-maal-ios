@@ -3,9 +3,9 @@ import Foundation
 public typealias V3 = SIMD3<Double>
 
 @inline(__always) func vdot(_ a: V3, _ b: V3) -> Double { a.x * b.x + a.y * b.y + a.z * b.z }
-@inline(__always) func vcross(_ a: V3, _ b: V3) -> V3 { V3(a.y * b.z - a.z * b.y, a.z * b.x - a.x * b.z, a.x * b.y - a.y * b.x) }
+@inline(__always) public func vcross(_ a: V3, _ b: V3) -> V3 { V3(a.y * b.z - a.z * b.y, a.z * b.x - a.x * b.z, a.x * b.y - a.y * b.x) }
 @inline(__always) func vlength(_ a: V3) -> Double { vdot(a, a).squareRoot() }
-@inline(__always) func vnormalized(_ a: V3) -> V3 { a / max(1e-12, vlength(a)) }
+@inline(__always) public func vnormalized(_ a: V3) -> V3 { a / max(1e-12, vlength(a)) }
 
 /// The camera as a pinhole, in pixels of the full camera picture.
 /// Camera coordinates: x right, y down, z forward (into the scene), metres.
