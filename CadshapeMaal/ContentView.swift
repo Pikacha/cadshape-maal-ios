@@ -215,7 +215,9 @@ struct BottomPanel: View {
     }
 
     @ViewBuilder private var content: some View {
-        if model.mode.isSpace {
+        if model.isCalibrating {
+            CalibrationContent(model: model)
+        } else if model.mode.isSpace {
             SpaceContent(model: model, space: model.space)
         } else if model.patternLocked {
             PatternLockedContent(model: model)
@@ -378,6 +380,7 @@ struct LockedContent: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             SizeHeader(text: model.shape?.text ?? "Tilpasser formen …", sure: model.uncertaintyText, unsure: model.unsure, busy: model.working)
+            EdgeChoiceView(model: model)
             HStack(spacing: 8) {
                 if let d = model.shape?.diameter, !nearStandard(d).isEmpty {
                     Text("Standard:").font(.footnote).opacity(0.75)
@@ -771,6 +774,7 @@ struct SettingsSheet: View {
                 } header: {
                     Text("PC-en på samme wifi")
                 }
+                CalibrationSection(model: model)
                 Section {
                     Toggle("Lås av seg selv når målet er stødig", isOn: $model.autoLock)
                 } header: {
@@ -783,8 +787,11 @@ struct SettingsSheet: View {
                         .font(.footnote)
                     Text("Best resultat: 30–80 cm unna, mest mulig rett på, godt lys og hele kanten i bildet.")
                         .font(.footnote)
+                    Text("Ser appen to kanter rundt hullet (skygge, fas eller hullets innside), låser den ikke av seg selv – du velger kanten etter låsing.")
+                        .font(.footnote)
                     Text("Inni boks og Gjenstand bruker LiDAR-punktene fra flere bilder samlet: bunnen, de fire veggene og kanten øverst (boks), eller bordet og alt som står opp fra det (gjenstand). Hold telefonen 25–60 cm over, rett ned. Tomme bokser og ryddige bord gir best mål; svarte og blanke flater ser LiDAR dårlig.")
                         .font(.footnote)
+                    Text(appVersionText).font(.footnote).opacity(0.6)
                 }
             }
             .navigationTitle("CadSHAPE Mål")

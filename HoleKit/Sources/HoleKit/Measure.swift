@@ -83,6 +83,31 @@ public struct FrameMeasurement {
     public var planeResidualMM = 0.0
     public var planeInlierRatio = 0.0
     public var usedSmoothedDepth = false
+    /// A second clear edge round the hole (shadow, chamfer, ring): the hole measured there instead.
+    public var edgeAlternative: EdgeAlternative?
+    /// The phone's hole calibration was applied to the sizes and outlines.
+    public var calibrated = false
+}
+
+/// The hole measured at the other of two clear edges (see EdgeProfile).
+public struct EdgeAlternative {
+    public var outlineMM: [P2]
+    public var sizeMM: Double
+    public var widthMM: Double
+    public var heightMM: Double
+    /// The other edge lies inside the found one (the found edge may include a ring round the hole).
+    public var inward: Bool
+    /// Share of the brightness step at the other edge (0…1).
+    public var share: Double
+
+    public init(outlineMM: [P2], sizeMM: Double, widthMM: Double, heightMM: Double, inward: Bool, share: Double) {
+        self.outlineMM = outlineMM
+        self.sizeMM = sizeMM
+        self.widthMM = widthMM
+        self.heightMM = heightMM
+        self.inward = inward
+        self.share = share
+    }
 }
 
 public enum MeasureFailure: Error {
@@ -120,6 +145,13 @@ public func measureFrame(_ input: FrameInput) -> Result<FrameMeasurement, Measur
         r.usedSmoothedDepth = input.usedSmoothedDepth
         r.centre = centreOn(full, surface, K) ?? r.centre
         if let dm = input.depth { r.depthMM = depthInside(hole, gray: g, depth: dm, plane: surface, intrinsics: K, scale: s) }
+        if let prof = edgeProfile(g, outline: hole.outline), let off = prof.altOffset {
+            let altGray = shiftOutline(hole.outline, normals: prof.normals, offset: off)
+            if let altMM = layOnto(altGray.map { $0 * s }, surface, K) {
+                let a = result(outlineGray: altGray, mm: altMM, plane: surface, used: used, source: .picture)
+                r.edgeAlternative = EdgeAlternative(outlineMM: a.outlineMM, sizeMM: a.sizeMM, widthMM: a.widthMM, heightMM: a.heightMM, inward: off < 0, share: prof.altShare)
+            }
+        }
         return .success(r)
     }
 

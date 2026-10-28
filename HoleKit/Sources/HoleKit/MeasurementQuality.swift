@@ -28,9 +28,14 @@ public func measurementQuality(_ measurements: [FrameMeasurement], trackingNorma
         let residualEffect = size * m.planeResidualMM / max(1, m.plane.distance * 1000)
         return max(systematicFloor, residualEffect)
     }.max() ?? .infinity
-    let uncertainty = max(0.3, max(resolution, surface)) + 1.5 * max(width.deviation, height.deviation)
+    // Two clear edges: the size is only known to within half the difference until the user picks one.
+    let twoEdges = recent.compactMap { m -> Double? in
+        guard let a = m.edgeAlternative else { return nil }
+        return max(abs(a.widthMM - m.widthMM), abs(a.heightMM - m.heightMM)) / 2
+    }.max() ?? 0
+    let uncertainty = max(max(0.3, max(resolution, surface)) + 1.5 * max(width.deviation, height.deviation), twoEdges)
     let supported = recent.allSatisfy {
-        $0.source == .picture && !$0.usedSmoothedDepth && $0.planePoints >= 60 &&
+        $0.source == .picture && !$0.usedSmoothedDepth && $0.planePoints >= 60 && $0.edgeAlternative == nil &&
         $0.planeInlierRatio >= 0.6 && $0.edgePixels >= 48 && $0.edgeResolutionMM > 0 &&
         $0.plane.distance >= 0.2 && $0.plane.distance <= 1 && $0.plane.tilt <= 35
     }
@@ -59,8 +64,14 @@ public struct MeasurementDiagnostics: Codable, Equatable {
     public var planeResidualMM: Double
     public var usedSmoothedDepth: Bool
     public var uncertaintyMM: Double?
+    /// The other of two clear edges (mm across), when there was one.
+    public var alternativeWidthMM: Double?
+    public var alternativeHeightMM: Double?
+    /// The phone's hole calibration that was applied, if any.
+    public var calibrationScale: Double?
+    public var calibrationOffsetMM: Double?
 
-    public init(_ m: FrameMeasurement, uncertaintyMM: Double?) {
+    public init(_ m: FrameMeasurement, uncertaintyMM: Double?, calibration: HoleCalibration? = nil) {
         source = m.source.rawValue
         widthMM = m.widthMM
         heightMM = m.heightMM
@@ -73,5 +84,11 @@ public struct MeasurementDiagnostics: Codable, Equatable {
         planeResidualMM = m.planeResidualMM
         usedSmoothedDepth = m.usedSmoothedDepth
         self.uncertaintyMM = uncertaintyMM
+        alternativeWidthMM = m.edgeAlternative?.widthMM
+        alternativeHeightMM = m.edgeAlternative?.heightMM
+        if m.calibrated, let c = calibration {
+            calibrationScale = c.scale
+            calibrationOffsetMM = c.offsetMM
+        }
     }
 }

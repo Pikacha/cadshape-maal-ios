@@ -103,6 +103,23 @@ final class MeasureModel: ObservableObject {
     @Published var done: String?
     @Published var error: String?
 
+    /// Two clear edges were seen round the locked hole; the other one (nil = one clear edge).
+    @Published var lockedAlternative: EdgeAlternative?
+    /// The locked hole uses the other edge (the user chose it).
+    @Published var usingAlternative = false
+
+    // Calibration with CadSHAPE's printed calibration plate
+    @Published var calibration: HoleCalibration? = MeasureModel.loadCalibration() {
+        didSet { MeasureModel.saveCalibration(calibration) }
+    }
+    /// Which plate hole is being measured (index into `calibrationHolesMM`), nil = not calibrating.
+    @Published var calibrationStep: Int?
+    /// Measured (raw) diameter per plate hole, nil = skipped.
+    @Published var calibrationSamples: [Double?] = []
+    /// The result after the last hole (shown before it is kept).
+    @Published var calibrationResult: Result<HoleCalibration, CalibrationProblem>?
+    var isCalibrating: Bool { calibrationStep != nil || calibrationResult != nil }
+
     // Hole pattern
     @Published var pattern: [PatternEntry] = []
     /// The pattern's holes on screen (numbered markers), updated with the camera.
@@ -231,7 +248,9 @@ final class MeasureModel: ObservableObject {
     func measured(_ r: Result<FrameMeasurement, MeasureFailure>, toScreen: (P2) -> CGPoint, tracking: ARCamera.TrackingState, cameraToWorld: simd_float4x4? = nil) {
         if locked || patternLocked || mode.isSpace { return }
         switch r {
-        case .success(let m):
+        case .success(let raw):
+            // The plate itself is measured without the old calibration.
+            let m = isCalibrating ? raw : calibrated(raw, calibration)
             if case .normal = tracking { trackingNormal = true } else { trackingNormal = false }
             if !trackingNormal { history = []; steadySince = nil }
             history.append(m)
@@ -241,6 +260,7 @@ final class MeasureModel: ObservableObject {
             if let t = cameraToWorld { lastWorld = toWorld(m, t) }
             updateSteadiness()
             hint = advice(m, tracking: tracking)
+            if isCalibrating { return }
             sendLive()
             checkAuto()
         case .failure(let f):
@@ -278,6 +298,10 @@ final class MeasureModel: ObservableObject {
         if m.plane.distance < 0.15 { return "Litt lenger unna – hele kanten rundt hullet må synes." }
         if m.plane.tilt > 35 { return "Hold telefonen mer rett mot flaten." }
         if mode == .pattern, isInPattern() { return "Dette hullet er allerede med. Sikt på neste." }
+        if let a = m.edgeAlternative {
+            let inner = min(m.widthMM, a.widthMM), outer = max(m.widthMM, a.widthMM)
+            return "Ser to kanter (\(mm(inner)) og \(mm(outer)) mm) – skygge, fas eller hullets innside. Lås og velg riktig kant."
+        }
         if m.source == .depth { return "Grov LiDAR-kant – lås manuelt og bruk kontrollmål før presspasning." }
         if m.edgePixels < 48 { return "Hullet er lite i bildet. Gå nærmere med hele kanten synlig og skarp." }
         if !quality.canAutoLock && (uncertainty ?? .infinity) > 0.5 { return "For usikkert for presspasning. Gå nærmere eller bruk kontrollmål etter låsing." }
@@ -374,13 +398,15 @@ final class MeasureModel: ObservableObject {
     var canLock: Bool { live != nil && trackingNormal && !locked }
 
     func lock(byItself: Bool = false) {
-        guard canLock, (!byItself || quality.canAutoLock), let rep = representative() else { return }
+        guard canLock, !isCalibrating, (!byItself || quality.canAutoLock), let rep = representative() else { return }
         haptic.notificationOccurred(.success)
         locked = true
         lockedByItself = byItself
         lockedOutline = rep.outlineMM
+        lockedAlternative = rep.edgeAlternative
+        usingAlternative = false
         controlDiameterMM = nil
-        lockedDiagnostics = MeasurementDiagnostics(rep, uncertaintyMM: uncertainty)
+        lockedDiagnostics = MeasurementDiagnostics(rep, uncertaintyMM: uncertainty, calibration: calibration)
         outlineOnScreen = []
         done = nil
         error = nil
@@ -453,6 +479,130 @@ final class MeasureModel: ObservableObject {
         }
         return .rect(w: hi.x - lo.x, h: hi.y - lo.y, r: 0)
     }
+
+    /// Two clear edges: switch the locked hole to the other one (and back).
+    func useOtherEdge() {
+        guard locked, !working, let alt = lockedAlternative else { return }
+        let current = EdgeAlternative(outlineMM: lockedOutline, sizeMM: abs(polygonArea(lockedOutline)).squareRoot(),
+                                      widthMM: lockedWidth, heightMM: lockedHeight, inward: !alt.inward, share: 1 - alt.share)
+        lockedOutline = alt.outlineMM
+        lockedAlternative = current
+        usingAlternative.toggle()
+        controlDiameterMM = nil
+        // The uncertainty no longer includes «which edge»: the user decided.
+        uncertainty = lockedDiagnostics?.uncertaintyMM.map { max(0.3, $0 - abs(current.widthMM - alt.widthMM) / 2) }
+        tap.impactOccurred()
+        fitLocked()
+    }
+
+    private var lockedWidth: Double {
+        let xs = lockedOutline.map(\.x)
+        return (xs.max() ?? 0) - (xs.min() ?? 0)
+    }
+
+    private var lockedHeight: Double {
+        let ys = lockedOutline.map(\.y)
+        return (ys.max() ?? 0) - (ys.min() ?? 0)
+    }
+
+    /// The locked hole's size at each of the two edges, inner first (for the choice in the panel).
+    var edgeChoices: (inner: Double, outer: Double, usingInner: Bool)? {
+        guard let alt = lockedAlternative else { return nil }
+        let here = fitCircle(lockedOutline).map { 2 * $0.radius } ?? lockedWidth
+        let there = fitCircle(alt.outlineMM).map { 2 * $0.radius } ?? alt.widthMM
+        return (min(here, there), max(here, there), here <= there)
+    }
+
+    // MARK: Calibration
+
+    private static let calibrationKey = "holeCalibration"
+
+    static func loadCalibration() -> HoleCalibration? {
+        guard let data = UserDefaults.standard.data(forKey: calibrationKey) else { return nil }
+        return try? JSONDecoder().decode(HoleCalibration.self, from: data)
+    }
+
+    static func saveCalibration(_ c: HoleCalibration?) {
+        if let c, let data = try? JSONEncoder().encode(c) {
+            UserDefaults.standard.set(data, forKey: calibrationKey)
+        } else {
+            UserDefaults.standard.removeObject(forKey: calibrationKey)
+        }
+    }
+
+    func startCalibration() {
+        showSettings = false
+        if mode != .single { mode = .single }
+        measureAgain()
+        calibrationSamples = Array(repeating: nil, count: calibrationHolesMM.count)
+        calibrationResult = nil
+        calibrationStep = 0
+        hint = "Sikt krysset midt på hullet merket \(Int(calibrationHolesMM[0]))."
+    }
+
+    /// The diameter of the hole in the cross-hair now: median of the last steady frames (raw, uncalibrated).
+    var calibrationReading: Double? {
+        let recent = history.suffix(8).filter { $0.source == .picture && $0.edgeAlternative == nil }
+        let ds = recent.compactMap { measuredDiameter($0) }.sorted()
+        guard ds.count >= 5, steadiness >= 0.7, trackingNormal else { return nil }
+        return ds[ds.count / 2]
+    }
+
+    /// Why the current reading cannot be used (nil = it can).
+    var calibrationBlocker: String? {
+        guard calibrationStep != nil else { return nil }
+        if live == nil { return "Sikt krysset midt på hullet." }
+        if live?.edgeAlternative != nil { return "Ser to kanter – gå nærmere og mer rett mot platen, med jevnt lys." }
+        if live?.source != .picture { return "Kanten synes ikke godt nok i bildet. Legg platen på et lyst underlag." }
+        if calibrationReading == nil { return "Hold stille …" }
+        return nil
+    }
+
+    func takeCalibrationSample() {
+        guard let step = calibrationStep, let d = calibrationReading else { return }
+        let expected = calibrationHolesMM[step]
+        // A much smaller/larger hole than expected is the wrong one, not a calibration.
+        if abs(d / expected - 1) > 0.35 {
+            hint = "Det hullet er \(mm(d)) mm – er det riktig hull (\(Int(expected)))? Sikt på hullet merket \(Int(expected))."
+            haptic.notificationOccurred(.warning)
+            return
+        }
+        haptic.notificationOccurred(.success)
+        calibrationSamples[step] = d
+        nextCalibrationStep()
+    }
+
+    func skipCalibrationSample() { nextCalibrationStep() }
+
+    private func nextCalibrationStep() {
+        guard let step = calibrationStep else { return }
+        history = []
+        steadiness = 0
+        if step + 1 < calibrationHolesMM.count {
+            calibrationStep = step + 1
+            hint = "Sikt krysset midt på hullet merket \(Int(calibrationHolesMM[step + 1]))."
+            return
+        }
+        calibrationStep = nil
+        let pairs = zip(calibrationSamples, calibrationHolesMM).compactMap { m, a in m.map { (measured: $0, actual: a) } }
+        calibrationResult = fitHoleCalibration(pairs)
+    }
+
+    func keepCalibration() {
+        if case .success(let c)? = calibrationResult { calibration = c }
+        cancelCalibration()
+    }
+
+    func cancelCalibration() {
+        calibrationStep = nil
+        calibrationResult = nil
+        calibrationSamples = []
+        history = []
+        steadiness = 0
+        hint = "Sikt krysset midt på hullet"
+    }
+
+    func removeCalibration() { calibration = nil }
 
     private func kindChanged() {
         controlDiameterMM = nil
@@ -539,6 +689,8 @@ final class MeasureModel: ObservableObject {
         savedId = nil
         controlDiameterMM = nil
         lockedDiagnostics = nil
+        lockedAlternative = nil
+        usingAlternative = false
         trackingNormal = false
         quality = measurementQuality([], trackingNormal: false)
         resumeCamera?()
