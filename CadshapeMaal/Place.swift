@@ -1,5 +1,6 @@
 import ARKit
 import HoleKit
+import Metal
 import RealityKit
 import SwiftUI
 

@@ -305,7 +305,7 @@ struct PartARScreen: View {
         .foregroundStyle(.white)
         .onAppear { ar.loadParts() }
         .sheet(isPresented: $showCard) { ApprovalSheet(watch: watch) }
-        .onChange(of: ar.chosen) { _ in watch.lastPartLabel = ar.chosenName }
+        .onChange(of: ar.chosen) { watch.lastPartLabel = ar.chosenName }
     }
 
     private var partChips: some View {

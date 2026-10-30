@@ -38,7 +38,7 @@ struct RootView: View {
             watch.start()
         }
         // Only ask the PC while the app is on screen.
-        .onChange(of: phase) { p in
+        .onChange(of: phase) { _, p in
             if p == .active {
                 model.startChecking()
                 watch.start()
