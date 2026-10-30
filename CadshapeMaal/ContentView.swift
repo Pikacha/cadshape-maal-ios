@@ -5,9 +5,11 @@ import UIKit
 let accent = Color(red: 0.95, green: 0.66, blue: 0.23)
 let good = Color(red: 0.36, green: 0.85, blue: 0.55)
 
+/// Measuring with the camera (holes, patterns, boxes, things, pipes, gaps) – one of the screens under «Hjem».
 struct ContentView: View {
-    @StateObject private var model = MeasureModel()
-    @Environment(\.scenePhase) private var phase
+    @ObservedObject var model: MeasureModel
+    /// Back to the home screen (nil: this is the only screen, e.g. the demo).
+    var onHome: (() -> Void)? = nil
 
     var body: some View {
         ZStack {
@@ -18,7 +20,20 @@ struct ContentView: View {
             }
             OverlayView(model: model, space: model.space).ignoresSafeArea().allowsHitTesting(false)
             VStack(spacing: 12) {
-                TopBar(model: model)
+                HStack(spacing: 8) {
+                    if let onHome {
+                        Button(action: onHome) {
+                            Image(systemName: "house.fill")
+                                .font(.footnote.weight(.semibold))
+                                .frame(width: 36, height: 36)
+                                .background(.ultraThinMaterial, in: Circle())
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityLabel("Til start")
+                        .padding(.top, 4)
+                    }
+                    TopBar(model: model)
+                }
                 Spacer(minLength: 0)
                 if model.wantsPairing {
                     PairingCard(model: model)
@@ -43,10 +58,6 @@ struct ContentView: View {
         .background(EmptyView().sheet(isPresented: $model.showSaved) { SavedSheet(model: model, store: model.store) })
         .onAppear { UIApplication.shared.isIdleTimerDisabled = true }
         .onDisappear { UIApplication.shared.isIdleTimerDisabled = false }
-        // Only ask the PC while the app is on screen.
-        .onChange(of: phase) { p in
-            if p == .active { model.startChecking() } else { model.stopChecking() }
-        }
     }
 }
 

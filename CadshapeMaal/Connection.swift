@@ -324,3 +324,51 @@ final class WebLogin: NSObject, URLSessionTaskDelegate {
         }.resume()
     }
 }
+
+// MARK: The other screens: parts for AR, 3D scans, «Godkjenn print», the printer
+
+extension CadshapeClient {
+    private func request(_ path: String, query: [String: String], timeout: TimeInterval, body: Data? = nil) -> URLRequest {
+        var r = request(path, body: body)
+        if !query.isEmpty, let url = r.url, var comps = URLComponents(url: url, resolvingAgainstBaseURL: false) {
+            comps.queryItems = query.sorted { $0.key < $1.key }.map { URLQueryItem(name: $0.key, value: $0.value) }
+            r.url = comps.url
+        }
+        r.timeoutInterval = timeout
+        return r
+    }
+
+    /// GET with a JSON answer.
+    func getJSON(_ path: String, query: [String: String] = [:], timeout: TimeInterval = 15, done: @escaping (Result<[String: Any], ClientError>) -> Void) {
+        call(request(path, query: query, timeout: timeout), done: done)
+    }
+
+    /// POST a JSON body (large ones too: a 3D scan), JSON answer.
+    func postJSON(_ path: String, body: [String: Any], timeout: TimeInterval = 15, done: @escaping (Result<[String: Any], ClientError>) -> Void) {
+        guard let data = try? JSONSerialization.data(withJSONObject: body) else { return done(.failure(.refused("Kunne ikke pakke meldingen."))) }
+        call(request(path, query: [:], timeout: timeout, body: data), done: done)
+    }
+
+    /// GET raw bytes (a part as STL, a camera picture). A JSON answer means an error.
+    func getData(_ path: String, query: [String: String] = [:], timeout: TimeInterval = 120, done: @escaping (Result<Data, ClientError>) -> Void) {
+        let r = request(path, query: query, timeout: timeout)
+        session.dataTask(with: r) { data, response, error in
+            let result: Result<Data, ClientError>
+            let status = (response as? HTTPURLResponse)?.statusCode ?? 0
+            let type = (response as? HTTPURLResponse)?.value(forHTTPHeaderField: "Content-Type") ?? ""
+            if error != nil {
+                result = .failure(.offline("Får ikke kontakt med CadSHAPE (\(self.pairing.hostLabel))."))
+            } else if status >= 400 || type.contains("json") {
+                let json = data.flatMap { try? JSONSerialization.jsonObject(with: $0) } as? [String: Any]
+                result = .failure(.refused(json?["error"] as? String ?? "CadSHAPE svarte med feil (\(status))."))
+            } else if let data, !data.isEmpty {
+                result = .success(data)
+            } else {
+                result = .failure(.refused("Tomt svar fra CadSHAPE."))
+            }
+            DispatchQueue.main.async {
+                if !self.dead { done(result) }
+            }
+        }.resume()
+    }
+}

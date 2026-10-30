@@ -140,6 +140,8 @@ final class MeasureModel: ObservableObject {
     var resumeCamera: (() -> Void)?
 
     private var client: CadshapeClient?
+    /// The connection to CadSHAPE, for the other screens (AR, scanning, prints). Nil = not paired.
+    var api: CadshapeClient? { client }
     private var history: [FrameMeasurement] = []
     private var lockedOutline: [P2] = []
     private var trackingNormal = false
