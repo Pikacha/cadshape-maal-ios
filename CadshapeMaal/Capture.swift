@@ -166,7 +166,7 @@ final class CaptureModel: ObservableObject {
         case .normal: break
         @unknown default: break
         }
-        if feedback.contains(.objectNotDetected) { return "Fant ikke tingen automatisk. Juster boksen manuelt rundt hele tingen." }
+        if #available(iOS 17.4, *), feedback.contains(.objectNotDetected) { return "Fant ikke tingen automatisk. Juster boksen manuelt rundt hele tingen." }
         if feedback.contains(.environmentLowLight) { return "Mer jevnt lys gir skarpere bilder og bedre modell." }
         return nil
     }
