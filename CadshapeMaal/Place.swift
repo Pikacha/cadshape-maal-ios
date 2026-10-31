@@ -94,12 +94,13 @@ final class PlaceModel: ObservableObject {
         guard !anchors.isEmpty else { error = "LiDAR-nettet er ikke klart ennå. Gå sakte rundt stedet et øyeblikk."; return }
         let centre: SIMD3<Float> = picks.isEmpty ? (frame.camera.transform * SIMD4<Float>(0, 0, -0.5, 1)).xyz : picks.map(\.point).reduce(.zero, +) / Float(picks.count)
         let c = V3(Double(centre.x), Double(centre.y), Double(centre.z))
-        let world = meshOf(anchors)
         sending = true
         error = nil
         let facts = self.facts
         let want = self.want.trimmingCharacters(in: .whitespaces)
+        // Copying the room mesh can take a moment on a big room: not on the main thread.
         DispatchQueue.global(qos: .userInitiated).async {
+            let world = meshOf(anchors)
             let piece = crop(world, centre: c, radius: 0.25).mapped { worldToCad($0, origin: c) }
             let stl = binarySTL(piece, header: "CadSHAPE Maal - stedet").base64EncodedString()
             let s = piece.size

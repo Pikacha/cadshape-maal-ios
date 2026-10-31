@@ -81,7 +81,7 @@ struct HomeView: View {
                 if let card = watch.card, card.state == "venter" {
                     approvalBanner(card)
                 }
-                if !watch.openJoints.isEmpty, watch.sawFinish || watch.printer?.state == "complete" {
+                if !watch.openJoints.isEmpty, watch.sawFinish {
                     JointFitCard(watch: watch)
                 }
                 if let p = watch.printer, p.online {
@@ -289,6 +289,11 @@ struct JointFitCard: View {
             if let m = watch.jointMessage {
                 Text(m).font(.footnote).foregroundStyle(muted)
             }
+            Button("Svar senere") { watch.sawFinish = false }
+                .font(.footnote.weight(.semibold))
+                .foregroundStyle(muted)
+                .frame(minHeight: 44)
+                .accessibilityHint("Skjuler spørsmålet til neste print er ferdig")
         }
         .padding(16)
         .background(panel, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
@@ -489,10 +494,13 @@ final class PrintWatch: ObservableObject {
             let p = PrinterInfo(j)
             self.printer = p
             self.scheduleDone(p)
-            if self.lastState == "printing", p.state == "complete" {
+            // Done while the app watched – or already done when it opened.
+            if p.state == "complete", self.lastState == "printing" || self.lastState == nil {
                 self.sawFinish = true
                 self.loadJoints()
             }
+            // A new print: the question waits until that one is done.
+            if p.state == "printing", self.lastState != "printing" { self.sawFinish = false }
             self.lastState = p.state
         }
         tick += 1
@@ -559,11 +567,14 @@ final class PrintWatch: ObservableObject {
         let key = "\(p.filename ?? "")|\(Int(r / 120))"
         if notifiedFor == key { return }
         notifiedFor = key
+        let body = openJoints.isEmpty
+            ? "\(p.title) skal være ferdig nå. Ta den av platen før neste print."
+            : "\(p.title) skal være ferdig nå. Prøv koblingene og svar på hvordan de passet – da lærer skriveren."
         center.requestAuthorization(options: [.alert, .sound]) { ok, _ in
             guard ok else { return }
             let content = UNMutableNotificationContent()
             content.title = "Printen er ferdig"
-            content.body = "\(p.title) skal være ferdig nå. Ta den av platen før neste print."
+            content.body = body
             content.sound = .default
             let trigger = UNTimeIntervalNotificationTrigger(timeInterval: r, repeats: false)
             center.add(UNNotificationRequest(identifier: id, content: content, trigger: trigger))

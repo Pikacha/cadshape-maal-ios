@@ -193,7 +193,9 @@ final class PartARModel: ObservableObject {
         for c in marks.children.map({ $0 }) { c.removeFromParent() }
         let red = SimpleMaterial(color: UIColor(red: 0.94, green: 0.39, blue: 0.36, alpha: 1), isMetallic: false)
         let dot = MeshResource.generateSphere(radius: 0.0025)
-        for h in hits {
+        // Every fourth of a second: a few dozen dots say where, more only cost frames.
+        let step = max(1, hits.count / 60)
+        for h in stride(from: 0, to: hits.count, by: step).map({ hits[$0] }) {
             let e = ModelEntity(mesh: dot, materials: [red])
             e.position = SIMD3<Float>(Float(h.x), Float(h.y), Float(h.z))
             marks.addChild(e)

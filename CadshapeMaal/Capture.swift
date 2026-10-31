@@ -315,7 +315,8 @@ struct CaptureScreen: View {
         }
         .foregroundStyle(.white)
         .onAppear { cap.start() }
-        .onDisappear { if cap.step != .done { cap.cancel() } }
+        // The photos (often several hundred MB) and the model go with the screen.
+        .onDisappear { cap.cancel() }
     }
 
     @ViewBuilder private var panel: some View {
