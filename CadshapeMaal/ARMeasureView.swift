@@ -40,8 +40,11 @@ final class Measurer: NSObject, ARSessionDelegate {
     private var busy = false
     private var last: TimeInterval = 0
     private var lastProjected: TimeInterval = 0
+    private var lastOutlineProjection: TimeInterval = 0
     /// Box and object modes: the last frames' LiDAR points together (used on `queue` only).
     private let cloud = PointCloudFrames()
+    /// World-space edge of the last valid hole; projected with every current camera frame.
+    private var holeOutline = TrackedHoleOutline()
 
     init(model: MeasureModel) {
         self.model = model
@@ -80,6 +83,10 @@ final class Measurer: NSObject, ARSessionDelegate {
     }
 
     func session(_ session: ARSession, didUpdate frame: ARFrame) {
+        if !model.locked && !model.patternLocked && !model.mode.isSpace && !model.wantsPairing && frame.timestamp - lastOutlineProjection >= 0.05 {
+            lastOutlineProjection = frame.timestamp
+            refreshOutline(frame)
+        }
         // The pattern's holes follow the camera on screen.
         if let view, !model.pattern.isEmpty, frame.timestamp - lastProjected > 0.05 {
             lastProjected = frame.timestamp
@@ -100,7 +107,7 @@ final class Measurer: NSObject, ARSessionDelegate {
         let seed = CGPoint(x: 0.5, y: 0.5).applying(toView.inverted())
         let pairing = model.wantsPairing
         let measuring = !model.locked && !pairing && !mode.isSpace
-        let tracking = frame.camera.trackingState
+        let capturedTracking = frame.camera.trackingState
         let cameraToWorld = frame.camera.transform
         let imageWidth = Double(frame.camera.imageResolution.width)
         var fallback: Plane? = nil
@@ -166,13 +173,48 @@ final class Measurer: NSObject, ARSessionDelegate {
                 self.busy = false
                 if let found { self.model.paired(found) } else if let web { self.model.sawWebAddress(web) }
                 guard let result else { return }
+                // A result from the previous screen/mode must not overwrite the current one.
+                guard self.model.mode == mode, self.model.wantsPairing == pairing else { return }
+                let measurement = try? result.get()
+                self.holeOutline.update(measurement, intrinsics: FrameReader.intrinsics(frame.camera),
+                    scale: imageWidth / w, pose: FrameReader.pose(frame.camera), timestamp: frame.timestamp)
+                let current = view.session.currentFrame ?? frame
                 let toScreen: (P2) -> CGPoint = { p in
                     let n = CGPoint(x: p.x / w, y: p.y / h).applying(toView)
                     return CGPoint(x: n.x * viewSize.width, y: n.y * viewSize.height)
                 }
-                self.model.measured(result, toScreen: toScreen, tracking: tracking, cameraToWorld: cameraToWorld)
+                // Recovery during analysis must not promote a frame captured with poor tracking.
+                let qualityTracking: ARCamera.TrackingState
+                if case .normal = capturedTracking {
+                    qualityTracking = current.camera.trackingState
+                } else {
+                    qualityTracking = capturedTracking
+                }
+                self.model.measured(result, toScreen: toScreen, tracking: qualityTracking, cameraToWorld: cameraToWorld,
+                    screenOutline: self.projectedOutline(current))
             }
         }
+    }
+
+    private func refreshOutline(_ frame: ARFrame) {
+        guard case .normal = frame.camera.trackingState else {
+            model.outlineOnScreen = []
+            return
+        }
+        model.outlineOnScreen = projectedOutline(frame)
+    }
+
+    private func projectedOutline(_ frame: ARFrame) -> [CGPoint] {
+        guard let view else { return [] }
+        guard case .normal = frame.camera.trackingState else { return [] }
+        let size = view.bounds.size
+        let transform = frame.displayTransform(for: .portrait, viewportSize: size)
+        return holeOutline.projected(intrinsics: FrameReader.intrinsics(frame.camera),
+            pose: FrameReader.pose(frame.camera), timestamp: frame.timestamp).map { p in
+                let n = CGPoint(x: p.x / Double(frame.camera.imageResolution.width),
+                    y: p.y / Double(frame.camera.imageResolution.height)).applying(transform)
+                return CGPoint(x: n.x * size.width, y: n.y * size.height)
+            }
     }
 }
 

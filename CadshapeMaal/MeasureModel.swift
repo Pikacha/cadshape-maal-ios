@@ -288,7 +288,7 @@ final class MeasureModel: ObservableObject {
 
     // MARK: Live measuring
 
-    func measured(_ r: Result<FrameMeasurement, MeasureFailure>, toScreen: (P2) -> CGPoint, tracking: ARCamera.TrackingState, cameraToWorld: simd_float4x4? = nil) {
+    func measured(_ r: Result<FrameMeasurement, MeasureFailure>, toScreen: (P2) -> CGPoint, tracking: ARCamera.TrackingState, cameraToWorld: simd_float4x4? = nil, screenOutline: [CGPoint]? = nil) {
         if locked || patternLocked || mode.isSpace { return }
         switch r {
         case .success(let raw):
@@ -299,7 +299,7 @@ final class MeasureModel: ObservableObject {
             history.append(m)
             if history.count > 12 { history.removeFirst(history.count - 12) }
             live = m
-            outlineOnScreen = m.outline.map(toScreen)
+            outlineOnScreen = screenOutline ?? m.outline.map(toScreen)
             if let t = cameraToWorld { lastWorld = toWorld(m, t) }
             updateSteadiness()
             hint = advice(m, tracking: tracking)

@@ -35,11 +35,15 @@ final class CaptureModel: ObservableObject {
     @Published var sent: String?
     @Published var notes: [String] = []
     @Published var error: String?
+    @Published var trackingHint: String?
+    @Published var stalled = false
 
     let api: CadshapeClient?
     private var folder: URL?
     private var timer: Timer?
     private var watching: Task<Void, Never>?
+    private var observedState: ObjectCaptureSession.CaptureState?
+    private var lastProgress = Date()
 
     init(api: CadshapeClient?) {
         self.api = api
@@ -52,6 +56,7 @@ final class CaptureModel: ObservableObject {
     private var checkpoints: URL? { folder?.appendingPathComponent("Underveis", isDirectory: true) }
 
     func start() {
+        guard session == nil else { return }
         guard ObjectCaptureSession.isSupported else { step = .unsupported; return }
         let base = FileManager.default.temporaryDirectory.appendingPathComponent("skann-\(UUID().uuidString)", isDirectory: true)
         folder = base
@@ -67,16 +72,20 @@ final class CaptureModel: ObservableObject {
         var cfg = ObjectCaptureSession.Configuration()
         cfg.checkpointDirectory = checkpoints
         cfg.isOverCaptureEnabled = false
-        s.start(imagesDirectory: images, configuration: cfg)
         session = s
+        observedState = nil
+        lastProgress = Date()
         shots = 0
         passes = 1
         passDone = false
         watching = Task { [weak self] in
             for await st in s.stateUpdates {
+                guard !Task.isCancelled, self?.session === s else { break }
                 self?.changed(st)
             }
         }
+        s.start(imagesDirectory: images, configuration: cfg)
+        poll()
         timer?.invalidate()
         timer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in
             Task { @MainActor in self?.poll() }
@@ -85,11 +94,22 @@ final class CaptureModel: ObservableObject {
 
     private func poll() {
         guard let s = session else { return }
+        // Read the current state too: an update emitted before the async observer starts
+        // must not leave our controls stuck on "Starter kameraet".
+        changed(s.state)
+        guard session === s else { return }
+        if shots != s.numberOfShotsTaken { lastProgress = Date() }
         shots = s.numberOfShotsTaken
         passDone = s.userCompletedScanPass
+        trackingHint = guidance(s)
+        stalled = !passDone && Date().timeIntervalSince(lastProgress) > 20
     }
 
     private func changed(_ st: ObjectCaptureSession.CaptureState) {
+        guard observedState != st else { return }
+        observedState = st
+        lastProgress = Date()
+        stalled = false
         switch st {
         case .initializing: step = .starting
         case .ready: step = .ready
@@ -110,8 +130,46 @@ final class CaptureModel: ObservableObject {
         }
     }
 
-    func detect() { _ = session?.startDetecting() }
-    func capture() { session?.startCapturing() }
+    func detect() {
+        guard let session else { return }
+        error = nil
+        // False means no horizontal support plane (or not ready). It used to be
+        // silently discarded, leaving "Finn tingen" apparently doing nothing.
+        if !session.startDetecting() {
+            error = guidance(session) ?? "Fant ikke bordflaten under tingen. Sikt skrått ned så både tingen og bordet rundt synes, og trykk «Finn tingen» igjen."
+        }
+    }
+    func capture() {
+        guard let session, session.state == .detecting else { return }
+        error = nil
+        session.startCapturing()
+    }
+
+    private func guidance(_ s: ObjectCaptureSession) -> String? {
+        let feedback = s.feedback
+        if feedback.contains(.environmentTooDark) { return "For mørkt til å skanne. Slå på mer jevnt lys." }
+        if feedback.contains(.objectTooClose) { return "Tingen er for nær kameraet. Gå litt bakover." }
+        if feedback.contains(.objectTooFar) { return "Tingen er for langt unna. Gå nærmere med hele tingen synlig." }
+        if feedback.contains(.outOfFieldOfView) { return "Tingen er utenfor bildet. Sikt boksen inn igjen." }
+        if feedback.contains(.movingTooFast) { return "Beveg telefonen saktere, og hold avstanden til tingen." }
+        switch s.cameraTracking {
+        case .notAvailable:
+            return "Kameraet finner posisjonen. Sikt skrått ned på et lyst bord med synlige detaljer."
+        case .limited(let reason):
+            switch reason {
+            case .excessiveMotion: return "Beveg telefonen saktere så kameraet finner posisjonen igjen."
+            case .insufficientFeatures: return "Kameraet finner for få detaljer. Legg tingen på matt papir med tekst eller mønster, i godt lys."
+            case .relocalizing: return "Kameraet prøver å finne igjen stedet. Sikt på samme bord, eller start kameraet på nytt."
+            case .initializing: return "Vis både tingen og bordet rundt. Flytt telefonen rolig litt sidelengs; ikke bare vipp den."
+            @unknown default: return "Kameraet har mistet posisjonen. Vis mer av bordet rundt tingen."
+            }
+        case .normal: break
+        @unknown default: break
+        }
+        if feedback.contains(.objectNotDetected) { return "Fant ikke tingen automatisk. Juster boksen manuelt rundt hele tingen." }
+        if feedback.contains(.environmentLowLight) { return "Mer jevnt lys gir skarpere bilder og bedre modell." }
+        return nil
+    }
     func newPass() {
         session?.beginNewScanPass()
         passes += 1
@@ -123,10 +181,12 @@ final class CaptureModel: ObservableObject {
     func finish() { session?.finish() }
 
     func cancel() {
-        session?.cancel()
+        let old = session
         session = nil
         timer?.invalidate()
         watching?.cancel()
+        watching = nil
+        old?.cancel()
         if let folder { try? FileManager.default.removeItem(at: folder) }
     }
 
@@ -137,6 +197,8 @@ final class CaptureModel: ObservableObject {
         sent = nil
         notes = []
         error = nil
+        trackingHint = nil
+        stalled = false
         step = .starting
         start()
     }
@@ -362,6 +424,20 @@ struct CaptureScreen: View {
             case .failed(let message):
                 Text(message).font(.subheadline.weight(.semibold))
                 Button("Prøv igjen") { cap.again() }.buttonStyle(PrimaryStyle())
+            }
+            if cap.session != nil {
+                if let hint = cap.trackingHint {
+                    Label(hint, systemImage: "camera.metering.unknown")
+                        .font(.subheadline)
+                }
+                if let error = cap.error {
+                    Text(error).font(.subheadline).foregroundStyle(.orange)
+                }
+                if cap.stalled && cap.step != .finishing {
+                    Text("Ingen fremdrift ennå. Start kameraet på nytt, eller gå til Hjem → Mål raskt → Ting for en enklere form med mål.")
+                        .font(.footnote)
+                    Button("Start kameraet på nytt") { cap.again() }.buttonStyle(SecondaryStyle())
+                }
             }
         }
         .modifier(GlassPanel())
