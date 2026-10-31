@@ -81,6 +81,9 @@ struct HomeView: View {
                 if let card = watch.card, card.state == "venter" {
                     approvalBanner(card)
                 }
+                if !watch.openJoints.isEmpty, watch.sawFinish || watch.printer?.state == "complete" {
+                    JointFitCard(watch: watch)
+                }
                 if let p = watch.printer, p.online {
                     PrinterRow(printer: p)
                 }
@@ -228,6 +231,71 @@ struct HomeView: View {
     }
 }
 
+/// A joint in the model and the answers that make sense for it (from `GET api/live/phone/joints`).
+struct JointQuestion: Identifiable, Equatable {
+    struct Feel: Equatable {
+        let feel: String
+        let label: String
+    }
+    let id: String
+    let part: String
+    let label: String
+    let felt: String?
+    let feels: [Feel]
+
+    init?(_ j: [String: Any]) {
+        guard let key = j["key"] as? String, let label = j["label"] as? String else { return nil }
+        id = key
+        part = j["part"] as? String ?? ""
+        self.label = label
+        felt = j["felt"] as? String
+        feels = (j["feels"] as? [[String: Any]] ?? []).compactMap { f in
+            guard let feel = f["feel"] as? String, let label = f["label"] as? String else { return nil }
+            return Feel(feel: feel, label: label)
+        }
+        if feels.isEmpty { return nil }
+    }
+}
+
+/// «Hvordan passet den?» – after a print: one joint at a time, one tap teaches the printer twin.
+struct JointFitCard: View {
+    @ObservedObject var watch: PrintWatch
+
+    var body: some View {
+        let open = watch.openJoints
+        VStack(alignment: .leading, spacing: 12) {
+            HStack {
+                Image(systemName: "puzzlepiece.extension").foregroundStyle(accent)
+                Text("Hvordan passet den?").font(.headline)
+                Spacer()
+                if open.count > 1 { Text("1 av \(open.count)").font(.footnote).foregroundStyle(muted) }
+            }
+            if let q = open.first {
+                Text("\(q.label) i «\(q.part)»").font(.subheadline).foregroundStyle(muted)
+                LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 8) {
+                    ForEach(q.feels, id: \.feel) { f in
+                        Button { watch.answer(q, feel: f.feel) } label: {
+                            Text(f.label)
+                                .font(.subheadline.weight(.semibold))
+                                .multilineTextAlignment(.center)
+                                .frame(maxWidth: .infinity, minHeight: 48)
+                                .background(f.feel == "slide" || f.feel == "press" ? accent.opacity(0.2) : Color.white.opacity(0.08), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+                        }
+                        .buttonStyle(.plain)
+                        .disabled(watch.jointBusy)
+                    }
+                }
+            }
+            if let m = watch.jointMessage {
+                Text(m).font(.footnote).foregroundStyle(muted)
+            }
+        }
+        .padding(16)
+        .background(panel, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 20, style: .continuous).stroke(accent.opacity(0.35), lineWidth: 1))
+    }
+}
+
 /// The printer now: what it prints, how far, when it is done.
 struct PrinterRow: View {
     let printer: PrinterInfo
@@ -367,9 +435,19 @@ final class PrintWatch: ObservableObject {
     @Published var lastPartLabel: String?
     weak var model: MeasureModel?
 
+    /// «Hvordan passet den?»: the joints in the open model (made with «Koble sammen»).
+    @Published var joints: [JointQuestion] = []
+    @Published var jointMessage: String?
+    @Published var jointBusy = false
+    /// A print finished while the app was watching – time to ask how the joints fit.
+    @Published var sawFinish = false
+    var openJoints: [JointQuestion] { joints.filter { $0.felt == nil } }
+
     private var timer: Timer?
     private var shownFor: String?
     private var notifiedFor: String?
+    private var tick = 0
+    private var lastState: String?
 
     func start() {
         guard timer == nil else { return }
@@ -411,6 +489,41 @@ final class PrintWatch: ObservableObject {
             let p = PrinterInfo(j)
             self.printer = p
             self.scheduleDone(p)
+            if self.lastState == "printing", p.state == "complete" {
+                self.sawFinish = true
+                self.loadJoints()
+            }
+            self.lastState = p.state
+        }
+        tick += 1
+        if tick % 5 == 1 { loadJoints() }
+    }
+
+    func loadJoints() {
+        guard let api = model?.api else { return }
+        api.getJSON("api/live/phone/joints") { [weak self] r in
+            guard let self, case .success(let j) = r, let res = j["result"] as? [String: Any] else { return }
+            let list = (res["joints"] as? [[String: Any]] ?? []).compactMap(JointQuestion.init)
+            if list != self.joints { self.joints = list }
+        }
+    }
+
+    /// One answer for a joint: goes to the printer twin on the PC and onto the holes in the model.
+    func answer(_ q: JointQuestion, feel: String) {
+        guard let api = model?.api else { return }
+        jointBusy = true
+        jointMessage = nil
+        api.postJSON("api/live/phone/joint", body: ["key": q.id, "feel": feel], timeout: 20) { [weak self] r in
+            guard let self else { return }
+            self.jointBusy = false
+            switch r {
+            case .success(let j):
+                self.jointMessage = (j["result"] as? [String: Any])?["text"] as? String ?? "Lagret."
+                UINotificationFeedbackGenerator().notificationOccurred(.success)
+                self.loadJoints()
+            case .failure(let e):
+                self.jointMessage = e.message
+            }
         }
     }
 

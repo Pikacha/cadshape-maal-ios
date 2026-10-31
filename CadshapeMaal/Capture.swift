@@ -30,6 +30,8 @@ final class CaptureModel: ObservableObject {
     @Published var modelURL: URL?
     @Published var name = ""
     @Published var sending = false
+    /// «Skann → holder»: CadSHAPE makes a holder shaped after the scan as soon as it arrives.
+    @Published var makeHolder = true
     @Published var sent: String?
     @Published var notes: [String] = []
     @Published var error: String?
@@ -193,10 +195,11 @@ final class CaptureModel: ObservableObject {
         error = nil
         let s = mesh.size
         let name = self.name.trimmingCharacters(in: .whitespaces).isEmpty ? "Skann" : self.name
+        let holder = makeHolder
         Task { [weak self] in
             let stl = await Task.detached { binarySTL(mesh, header: "CadSHAPE Maal - Object Capture").base64EncodedString() }.value
             let body: [String: Any] = [
-                "type": "mesh", "role": "ting", "name": name, "stl": stl,
+                "type": "mesh", "role": "ting", "name": name, "stl": stl, "make": holder ? "holder" : "none",
                 "size": [s.x, s.y, s.z].map { ($0 * 10).rounded() / 10 },
                 "notes": ["3D-skann fra telefonen (Object Capture, \(mesh.triangleCount) trekanter). Mål kritiske hull med Hull-modus."],
             ]
@@ -209,6 +212,7 @@ final class CaptureModel: ObservableObject {
                     self.sent = result?["label"] as? String ?? "Sendt til CadSHAPE"
                     let lib = (j["library"] as? [[String: Any]] ?? []).compactMap { $0["name"] as? String }
                     self.notes = lib.isEmpty ? [] : ["Ligner \(lib[0]) i biblioteket. Koble delen til den i CadSHAPE hvis det stemmer – da brukes de eksakte målene derfra."]
+                    if holder { self.notes.append("Holderen regnes ut på PC-en nå – formet etter skannet, og den løftes rett opp.") }
                     UINotificationFeedbackGenerator().notificationOccurred(.success)
                 case .failure(let e):
                     self.error = e.message
@@ -381,6 +385,11 @@ struct CaptureScreen: View {
             TextField("Navn", text: $cap.name)
                 .textFieldStyle(.roundedBorder)
                 .foregroundStyle(.black)
+            Picker("Hva lager vi?", selection: $cap.makeHolder) {
+                Text("Holder rundt den").tag(true)
+                Text("Bare modellen").tag(false)
+            }
+            .pickerStyle(.segmented)
             if let e = cap.error { Text(e).font(.subheadline).foregroundStyle(.red) }
             Button {
                 cap.send()
