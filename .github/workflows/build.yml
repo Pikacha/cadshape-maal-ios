@@ -46,6 +46,7 @@ jobs:
             -destination 'generic/platform=iOS' \
             -derivedDataPath build \
             CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" \
+            CURRENT_PROJECT_VERSION="$((100 + GITHUB_RUN_NUMBER))" \
             build | tee build.log | grep -E "error:|warning: .*(deprecated|never|unused)|BUILD (SUCCEEDED|FAILED)" || true
           test -d build/Build/Products/Release-iphoneos/CadshapeMaal.app || { tail -n 200 build.log; exit 1; }
 
@@ -72,3 +73,23 @@ jobs:
             --target "$GITHUB_SHA" \
             --title "CadSHAPE Mål – siste bygg" \
             --notes "Usignert IPA bygd fra $GITHUB_SHA. Installer med Sideloadly eller SideStore (se README)."
+
+      # SideStore source: the phone checks this file and offers the update over wifi.
+      # It lives on its own branch «source» so pushing it does not start another build.
+      - name: Update the SideStore source
+        if: github.ref == 'refs/heads/main'
+        run: |
+          set -e
+          rm -rf source-out
+          mkdir source-out
+          python3 ci/sidestore-source.py build/Build/Products/Release-iphoneos/CadshapeMaal.app CadshapeMaal.ipa source-out/sidestore.json
+          cp CadshapeMaal/Assets.xcassets/AppIcon.appiconset/icon-1024.png source-out/icon.png
+          python3 -c "import json; json.load(open('source-out/sidestore.json'))"
+          cd source-out
+          git init -q -b source
+          git config user.name "github-actions[bot]"
+          git config user.email "41898309+github-actions[bot]@users.noreply.github.com"
+          git add sidestore.json icon.png
+          git commit -q -m "SideStore-kilde for $GITHUB_SHA"
+          git push -q -f "https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}.git" source:source
+          echo "Kilde: https://raw.githubusercontent.com/${{ github.repository }}/source/sidestore.json"

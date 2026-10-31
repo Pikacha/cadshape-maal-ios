@@ -32,8 +32,31 @@ Apple-ID-en og passordet ditt skrives bare inn i Sideloadly/SideStore – aldri 
 6. Åpne **CadSHAPE Mål**. Tillat kamera og «enheter i lokalt nettverk».
 
 **Gratis Apple-ID:** appen må fornyes hver 7. dag. Kjør Sideloadly på nytt med samme IPA
-(innstillingene beholdes), eller bruk **SideStore**, som fornyer over wifi uten PC.
-Du kan ha inntil 3 slike apper samtidig.
+(innstillingene beholdes), eller bruk **SideStore**, som fornyer og oppdaterer over wifi uten PC.
+Du kan ha inntil 3 slike apper samtidig (SideStore teller som én).
+
+### Oppdatere over wifi med SideStore
+
+Hvert bygg her legger også en SideStore-kilde på
+`https://raw.githubusercontent.com/Pikacha/cadshape-maal-ios/source/sidestore.json`
+(versjon, byggnummer, størrelse og tillatelser leses fra selve IPA-en). Når SideStore ser et
+nytt byggnummer, dukker **Oppdater** opp på appen.
+
+Én gang, med kabel:
+
+1. På PC-en: **iTunes** (fra Apple, ikke Microsoft Store) og **iloader** (iloader.site).
+2. På iPhone: kode på skjermen, og **Utviklermodus på** (Personvern og sikkerhet).
+3. Koble til med kabel, åpne iloader, logg inn med Apple-ID-en og velg **Install SideStore**.
+   iloader legger også inn sammenkoblingsfilen (pairing file) SideStore trenger.
+4. På iPhone: **Stol på** Apple-ID-en under *VPN og enhetsadministrasjon*, installer
+   **LocalDevVPN** fra App Store og slå den på.
+5. Åpne SideStore, logg inn med samme Apple-ID. **Kilder → +** → lim inn adressen over.
+6. Bla til CadSHAPE Mål → **Installer**. Slett gjerne den gamle Sideloadly-kopien etterpå
+   (SideStore gir appen sitt eget bundle-ID, så de blir to apper). Logg inn på nett /
+   skann QR på nytt i den nye.
+
+Etterpå, uten PC: slå på LocalDevVPN, åpne SideStore → **Mine apper** → **Oppdater** når det
+er en ny versjon, og **Oppdater alle** (refresh) minst hver 7. dag. Wifi må være på.
 
 ## Bruk
 
