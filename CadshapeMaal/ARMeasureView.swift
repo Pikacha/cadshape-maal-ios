@@ -140,9 +140,12 @@ final class Measurer: NSObject, ARSessionDelegate {
         queue.async { [weak self] in
             guard let self else { return }
             var found: Pairing? = nil
+            var web: URL? = nil
             if pairing {
                 for text in FrameReader.qrTexts(frame.capturedImage) {
                     if let p = Pairing.parse(text) { found = p; break }
+                    // The QR code of CadSHAPE on the web (kloki.no/cadshape): log in there instead.
+                    if web == nil, let u = Pairing.webAddress(text), u.host.map({ !$0.first!.isNumber }) == true { web = u }
                 }
             }
             var result: Result<FrameMeasurement, MeasureFailure>? = nil
@@ -161,7 +164,7 @@ final class Measurer: NSObject, ARSessionDelegate {
             let w = gw, h = gh
             DispatchQueue.main.async {
                 self.busy = false
-                if let found { self.model.paired(found) }
+                if let found { self.model.paired(found) } else if let web { self.model.sawWebAddress(web) }
                 guard let result else { return }
                 let toScreen: (P2) -> CGPoint = { p in
                     let n = CGPoint(x: p.x / w, y: p.y / h).applying(toView)

@@ -69,7 +69,7 @@ struct HomeView: View {
                 Text("Hva vil du lage?")
                     .font(.system(size: 34, weight: .bold, design: .rounded))
                     .padding(.top, 4)
-                if model.pairing == nil {
+                if model.pairing == nil || (model.pcOpen != true && model.connectionError != nil) {
                     connectCard
                 }
                 bigTile
@@ -94,6 +94,14 @@ struct HomeView: View {
         }
         .background(ground.ignoresSafeArea())
         .foregroundStyle(.white)
+        // «Koble til» right here: log in to CadSHAPE on the web, or go to the camera for the QR code.
+        .sheet(isPresented: $model.showConnect) {
+            SettingsSheet(model: model) {
+                model.showConnect = false
+                model.wantsPairing = true
+                open(.measure)
+            }
+        }
     }
 
     private var header: some View {
@@ -103,7 +111,7 @@ struct HomeView: View {
                 (Text("CadSHAPE ") + Text("Mål").foregroundColor(accent)).font(.headline)
             }
             Spacer()
-            Button { open(.measure); model.showSettings = true } label: {
+            Button { model.showConnect = true } label: {
                 HStack(spacing: 6) {
                     Circle().fill(statusColor).frame(width: 8, height: 8)
                     Text(statusText).font(.footnote.weight(.semibold)).lineLimit(1)
@@ -124,24 +132,38 @@ struct HomeView: View {
     private var statusText: String {
         guard let p = model.pairing else { return "Ikke koblet til" }
         if model.pcOpen == true { return watch.printer?.ready == true ? "PC-en og skriveren er klare" : "Koblet til \(p.hostLabel)" }
-        return model.pcOpen == false ? "CadSHAPE er ikke åpent" : "Kobler til …"
+        if model.pcOpen == false { return "CadSHAPE er ikke åpent" }
+        return model.connectionError == nil ? "Kobler til …" : "Ingen kontakt"
     }
 
+    /// Not connected, or the connection does not answer: what is wrong and the two ways in.
     private var connectCard: some View {
-        Button { open(.measure) } label: {
-            HStack(spacing: 12) {
-                Image(systemName: "qrcode.viewfinder").font(.title2)
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("Koble til CadSHAPE").font(.headline)
-                    Text("Skann QR-koden under Fil → Mål med telefonen").font(.subheadline).foregroundStyle(muted)
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(alignment: .top, spacing: 12) {
+                Image(systemName: model.pairing == nil ? "link" : "exclamationmark.triangle").font(.title2).foregroundStyle(accent)
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(model.pairing == nil ? "Koble til CadSHAPE" : (model.pcOpen == false ? "CadSHAPE er ikke åpent" : "Får ikke kontakt med CadSHAPE")).font(.headline)
+                    Text(model.pairing == nil
+                         ? "Bruker du CadSHAPE på kloki.no: logg inn med samme passord. På PC-en med START_CADSHAPE_MOBIL.bat: skann QR-koden under Fil → Mål med telefonen."
+                         : (model.connectionError ?? ""))
+                        .font(.subheadline)
+                        .foregroundStyle(muted)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
-                Spacer()
             }
-            .padding(16)
-            .background(panel, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
-            .overlay(RoundedRectangle(cornerRadius: 20, style: .continuous).stroke(accent.opacity(0.5), lineWidth: 1))
+            HStack(spacing: 10) {
+                Button { model.showConnect = true } label: { Label("Logg inn på nett", systemImage: "globe") }
+                    .buttonStyle(PrimaryStyle())
+                Button {
+                    model.wantsPairing = true
+                    open(.measure)
+                } label: { Label("Skann QR", systemImage: "qrcode.viewfinder") }
+                    .buttonStyle(SecondaryStyle())
+            }
         }
-        .buttonStyle(.plain)
+        .padding(16)
+        .background(panel, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 20, style: .continuous).stroke(accent.opacity(0.5), lineWidth: 1))
     }
 
     private var bigTile: some View {

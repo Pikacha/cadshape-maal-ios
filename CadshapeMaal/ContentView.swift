@@ -697,6 +697,8 @@ struct PairingCard: View {
 
 struct SettingsSheet: View {
     @ObservedObject var model: MeasureModel
+    /// From the home screen: «Skann QR-koden» opens the camera screen (nil = this screen has the camera).
+    var onScanQR: (() -> Void)? = nil
     @State private var link = ""
     @State private var badLink = false
     @State private var web = "kloki.no/cadshape"
@@ -704,6 +706,11 @@ struct SettingsSheet: View {
     @State private var loggingIn = false
     @State private var loginError: String?
     private let login = WebLogin()
+
+    init(model: MeasureModel, onScanQR: (() -> Void)? = nil) {
+        self.model = model
+        self.onScanQR = onScanQR
+    }
 
     var body: some View {
         NavigationStack {
@@ -762,8 +769,12 @@ struct SettingsSheet: View {
                 }
                 Section {
                     Button {
-                        model.showSettings = false
-                        model.wantsPairing = true
+                        if let onScanQR {
+                            onScanQR()
+                        } else {
+                            model.showSettings = false
+                            model.wantsPairing = true
+                        }
                     } label: {
                         Label("Skann QR-koden", systemImage: "qrcode.viewfinder")
                     }
@@ -809,10 +820,14 @@ struct SettingsSheet: View {
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .confirmationAction) {
-                    Button("Ferdig") { model.showSettings = false }
+                    Button("Ferdig") {
+                        model.showSettings = false
+                        model.showConnect = false
+                    }
                 }
             }
         }
+        .onAppear { if let s = model.webSuggestion { web = s } }
         .preferredColorScheme(.dark)
     }
 }

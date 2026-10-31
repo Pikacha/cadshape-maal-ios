@@ -62,6 +62,8 @@ final class MeasureModel: ObservableObject {
     @Published var pcOpen: Bool?
     @Published var connectionError: String?
     @Published var showSettings = false
+    /// Failed checks in a row against the PC on the Wi-Fi.
+    private var lanFailures = 0
     @Published var showSaved = false
 
     // The camera
@@ -167,8 +169,34 @@ final class MeasureModel: ObservableObject {
             wantsPairing = demo == "pairing"
             return
         }
-        if let p = Pairing.load() { connect(p) } else { wantsPairing = true }
+        if let p = Pairing.load() {
+            connect(p)
+        } else if let web = Self.savedWeb {
+            // Logged in to CadSHAPE on the web before (the login is in the keychain): use it.
+            connect(.web(web))
+        } else {
+            wantsPairing = true
+        }
         startChecking()
+    }
+
+    /// CadSHAPE on the web that this iPhone is still logged in to, if any.
+    static var savedWeb: URL? {
+        guard let base = Pairing.webAddress("kloki.no/cadshape"), Keychain.read(account: base.absoluteString) != nil else { return nil }
+        return base
+    }
+
+    /// The «Koble til» sheet on the home screen (login on the web, or scan the QR code on the PC).
+    @Published var showConnect = false
+    /// A web address seen in a QR code – the login is filled in with it.
+    @Published var webSuggestion: String?
+
+    /// The QR code from CadSHAPE on the web: no key in it, so the login asks for the password.
+    func sawWebAddress(_ url: URL) {
+        guard !showSettings else { return }
+        webSuggestion = (url.host ?? "") + url.path
+        wantsPairing = false
+        showSettings = true
     }
 
     // MARK: The PC
@@ -192,6 +220,7 @@ final class MeasureModel: ObservableObject {
         connect(p)
         wantsPairing = false
         showSettings = false
+        showConnect = false
     }
 
     /// Logged in to CadSHAPE on the web.
@@ -233,12 +262,24 @@ final class MeasureModel: ObservableObject {
             guard let self else { return }
             switch r {
             case .success(let open):
+                self.lanFailures = 0
                 self.pcOpen = open
                 let online = self.pairing?.isOnline == true
                 self.connectionError = open ? nil : (online ? "CadSHAPE er ikke åpent i noen nettleser. Åpne \(self.pairing?.hostLabel ?? "CadSHAPE") på PC-en." : "CadSHAPE er ikke åpent i nettleseren på PC-en.")
             case .failure(let e):
                 self.pcOpen = nil
                 self.connectionError = e.message
+                // The PC on the Wi-Fi does not answer (off, other network, new address) – but this
+                // iPhone is logged in to CadSHAPE on the web: switch there by itself.
+                if self.pairing?.isOnline == false {
+                    self.lanFailures += 1
+                    if self.lanFailures >= 3, let web = Self.savedWeb {
+                        self.lanFailures = 0
+                        let p = Pairing.web(web)
+                        p.save()
+                        self.connect(p)
+                    }
+                }
             }
         }
     }
