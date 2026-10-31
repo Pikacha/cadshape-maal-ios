@@ -1,0 +1,39 @@
+{
+  "name": "CadSHAPE",
+  "subtitle": "Appene til CadSHAPE",
+  "description": "Oppdateringer av CadSHAPE Mål rett fra GitHub-bygget.",
+  "iconURL": "https://raw.githubusercontent.com/Pikacha/cadshape-maal-ios/source/icon.png",
+  "website": "https://kloki.no/cadshape",
+  "tintColor": "#ff7a1a",
+  "apps": [
+    {
+      "name": "CadSHAPE Mål",
+      "bundleIdentifier": "no.cadshape.maal",
+      "developerName": "Pikacha",
+      "subtitle": "Mål, skann og se delene dine i AR",
+      "localizedDescription": "Mål hull og rom med LiDAR, 3D-skann ting, se delene dine i AR og følg printen fra telefonen. Kobles til CadSHAPE på PC-en eller på kloki.no/cadshape.",
+      "iconURL": "https://raw.githubusercontent.com/Pikacha/cadshape-maal-ios/source/icon.png",
+      "tintColor": "#ff7a1a",
+      "category": "utilities",
+      "versions": [
+        {
+          "version": "2.3",
+          "buildVersion": "120",
+          "date": "2026-10-31T12:01:27Z",
+          "localizedDescription": "Bygd fra bebc21a.",
+          "downloadURL": "https://github.com/Pikacha/cadshape-maal-ios/releases/download/latest/CadshapeMaal.ipa",
+          "size": 1146482,
+          "minOSVersion": "17.0"
+        }
+      ],
+      "appPermissions": {
+        "entitlements": [],
+        "privacy": {
+          "NSCameraUsageDescription": "Kameraet og LiDAR brukes til å måle hull og rom, 3D-skanne ting og steder, og vise delene dine i AR.",
+          "NSLocalNetworkUsageDescription": "Appen sender målene til CadSHAPE på PC-en din i samme nettverk."
+        }
+      }
+    }
+  ],
+  "news": []
+}
