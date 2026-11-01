@@ -149,6 +149,8 @@ final class MeasureModel: ObservableObject {
     private var trackingNormal = false
     /// Frames in a row where no hole was found.
     private var misses = 0
+    /// Which lock an answer from CadSHAPE belongs to.
+    private var lockToken = UUID()
     private var quality = measurementQuality([], trackingNormal: false)
     private var lockedDiagnostics: MeasurementDiagnostics?
     private var lastWorld: (centre: SIMD3<Float>, normal: SIMD3<Float>)?
@@ -176,9 +178,9 @@ final class MeasureModel: ObservableObject {
         } else if let web = Self.savedWeb {
             // Logged in to CadSHAPE on the web before (the login is in the keychain): use it.
             connect(.web(web))
-        } else {
-            wantsPairing = true
         }
+        // Not connected: the home screen asks for it. Measuring works straight away and is saved
+        // on the phone until CadSHAPE is reachable (it used to open on the QR-code camera).
         startChecking()
     }
 
@@ -233,6 +235,10 @@ final class MeasureModel: ObservableObject {
 
     private func connect(_ p: Pairing) {
         client?.invalidate()
+        // Answers from the old connection never come: nothing may stay «busy» waiting for them.
+        sending = false
+        working = false
+        space.connectionChanged()
         let c = CadshapeClient(pairing: p)
         c.onPin = { [weak self] pin in
             guard let self, var current = self.pairing else { return }
@@ -250,6 +256,9 @@ final class MeasureModel: ObservableObject {
     func forget() {
         client?.invalidate()
         client = nil
+        sending = false
+        working = false
+        space.connectionChanged()
         Pairing.forget()
         pairing = nil
         pcOpen = nil
@@ -302,7 +311,8 @@ final class MeasureModel: ObservableObject {
             history.append(m)
             if history.count > 12 { history.removeFirst(history.count - 12) }
             live = m
-            outlineOnScreen = screenOutline ?? m.outline.map(toScreen)
+            // The tracked outline is empty when it could not be projected: then draw this frame's own.
+            outlineOnScreen = screenOutline.flatMap { $0.isEmpty ? nil : $0 } ?? m.outline.map(toScreen)
             if let t = cameraToWorld { lastWorld = toWorld(m, t) }
             updateSteadiness()
             hint = advice(m, tracking: tracking)
@@ -356,10 +366,10 @@ final class MeasureModel: ObservableObject {
             let inner = min(m.widthMM, a.widthMM), outer = max(m.widthMM, a.widthMM)
             return "Ser to kanter (\(mm(inner)) og \(mm(outer)) mm) – skygge, fas eller hullets innside. Lås og velg riktig kant."
         }
-        if m.source == .depth { return "Kanten er funnet med LiDAR (hullet skiller seg lite ut i bildet). Trykk «Lås målet»." }
+        if m.source == .depth { return "Kanten er grov – hullet synes dårlig i bildet. Lås og kontroller målet." }
         if m.edgePixels < 40 { return "Hullet er lite i bildet. Gå nærmere med hele kanten synlig og skarp." }
         if steadiness < 0.7 { return "Hold stille …" }
-        if autoLock && !quality.canAutoLock { return "Stødig – trykk «Lås målet». (Gå litt nærmere og rettere på, så låser den selv.)" }
+        if autoLock && !quality.canAutoLock { return "Stødig – trykk «Lås målet». Gå nærmere og rettere på for automatisk lås." }
         if mode == .pattern { return autoLock ? "Stødig – legges til …" : "Stødig – trykk «Legg til hull»." }
         return autoLock ? "Stødig – låser …" : "Stødig – trykk «Lås målet»."
     }
@@ -485,8 +495,11 @@ final class MeasureModel: ObservableObject {
             return
         }
         working = true
+        // «Mål på nytt» and a new lock before the answer came: the old answer must not land in it.
+        let token = UUID()
+        lockToken = token
         client.outline(lockedOutline, kind: forcedKind, make: make, params: params, preview: true) { [weak self] r in
-            guard let self, self.locked else { return }
+            guard let self, self.locked, self.lockToken == token else { return }
             self.working = false
             switch r {
             case .success(let a):
@@ -753,6 +766,8 @@ final class MeasureModel: ObservableObject {
     // MARK: Hole pattern
 
     private func modeChanged() {
+        // The calibration plate is measured as one hole: another mode would leave it stuck.
+        if mode != .single && calibrationStep != nil { cancelCalibration() }
         measureAgain()
         pattern = []
         patternOnScreen = []
@@ -888,6 +903,7 @@ final class MeasureModel: ObservableObject {
         pattern = []
         patternOnScreen = []
         patternLocked = false
+        working = false
         savedId = nil
         done = nil
         error = nil

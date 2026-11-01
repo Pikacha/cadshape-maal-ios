@@ -297,6 +297,7 @@ final class SpaceModel: ObservableObject {
         objects = []
         diameters = []
         surfaces = []
+        misses = 0
         steadySince = nil
         locked = false
         manual = false
@@ -305,6 +306,11 @@ final class SpaceModel: ObservableObject {
         error = nil
         working = false
         hint = startHint
+    }
+
+    /// The app switched connection: an answer from the old one never comes.
+    func connectionChanged() {
+        working = false
     }
 
     func reset() {
@@ -337,9 +343,18 @@ final class SpaceModel: ObservableObject {
             lost("Finner ikke bunnen og veggene. Sikt krysset på bunnen av boksen, 25–60 cm over den.")
             return
         }
-        boxes.append(BoxSample(width: fit.width, length: fit.length, height: fit.height, wall: fit.wall))
+        misses = 0
+        var sample = BoxSample(width: fit.width, length: fit.length, height: fit.height, wall: fit.wall)
+        // A box at ~45° to the phone: width and length can swap from frame to frame. Keep them apart.
+        if let prev = boxes.last,
+           abs(sample.width - prev.length) + abs(sample.length - prev.width) < abs(sample.width - prev.width) + abs(sample.length - prev.length) {
+            let w = sample.width
+            sample.width = sample.length
+            sample.length = w
+        }
+        boxes.append(sample)
         if boxes.count > 8 { boxes.removeFirst(boxes.count - 8) }
-        steadiness = agreement([boxes.map(\.width), boxes.map(\.length)]) * (fit.allWallsSeen ? 1 : 0.6)
+        steadiness = agreement([boxes.map(\.width), boxes.map(\.length)], absMM: 1.5, relative: 0.005) * (fit.allWallsSeen ? 1 : 0.6)
         if !fit.allWallsSeen {
             hint = "Ser ikke alle fire veggene. Hold telefonen mer midt over boksen."
         } else if fit.height == nil {
@@ -358,9 +373,11 @@ final class SpaceModel: ObservableObject {
             lost("Finner ikke tingen. Legg den på et ryddig bord og sikt krysset midt på den, 25–50 cm over.")
             return
         }
+        misses = 0
         objects.append(fit)
         if objects.count > 8 { objects.removeFirst(objects.count - 8) }
-        steadiness = agreement([objects.map(\.width), objects.map(\.length)])
+        // Sorted sides: turning the phone a little must not swap width and length.
+        steadiness = agreement([objects.map { max($0.width, $0.length) }, objects.map { min($0.width, $0.length) }], absMM: 1.5, relative: 0.01)
         hint = steadyHint
         checkAuto(ready: true)
     }
@@ -373,9 +390,10 @@ final class SpaceModel: ObservableObject {
             lost("Finner ikke noe rundt i krysset. Sikt midt på røret fra siden, med litt luft bak det.")
             return
         }
+        misses = 0
         diameters.append(fit.diameter)
         if diameters.count > 8 { diameters.removeFirst(diameters.count - 8) }
-        steadiness = agreement([diameters])
+        steadiness = agreement([diameters], absMM: 0.5, relative: 0.01)
         hint = fit.residual > 2 ? "Ujevn flate – er det et rør? Gå litt nærmere." : steadyHint
         checkAuto(ready: fit.residual <= 2)
     }
@@ -388,13 +406,25 @@ final class SpaceModel: ObservableObject {
             lost("Finner ingen flate i krysset. Gå litt nærmere.")
             return
         }
+        misses = 0
         surfaces.append(hit)
         if surfaces.count > 6 { surfaces.removeFirst(surfaces.count - 6) }
         steadiness = min(1, Double(surfaces.count) / 4)
         hint = startHint
     }
 
+    /// Frames in a row without a fit.
+    private var misses = 0
+
     private func lost(_ text: String) {
+        // One frame without a fit (an edge at the picture border, a blurry frame) must not throw
+        // away what has been measured: only a few in a row do.
+        misses += 1
+        if misses < 3 {
+            steadiness *= 0.7
+            steadySince = nil
+            return
+        }
         boxes.removeAll()
         objects.removeAll()
         diameters.removeAll()
@@ -408,19 +438,27 @@ final class SpaceModel: ObservableObject {
         steadiness < 0.7 ? "Hold stille …" : ((owner?.autoLock ?? false) ? "Stødig – låser …" : "Stødig – trykk «Lås målet».")
     }
 
+    /// No depth in this frame. On a phone without LiDAR that is final; with LiDAR it is just a
+    /// frame without depth (start-up, after a pause) – then it counts as one miss.
     func noLidar() {
-        hint = "Dette trenger LiDAR (iPhone Pro). Skriv inn målene i stedet."
+        if owner?.hasLidar == false {
+            hint = "Dette trenger LiDAR (iPhone Pro). Skriv inn målene i stedet."
+        } else {
+            lost(hint)
+        }
     }
 
-    /// 0…1: how much the last sizes agree (within 1 % is steady).
-    private func agreement(_ series: [[Double]]) -> Double {
+    /// 0…1: how much the last sizes agree. Steady = the typical deviation is within
+    /// `absMM` or `relative` of the size, whichever is larger (LiDAR is never steadier than ~1 mm).
+    private func agreement(_ series: [[Double]], absMM: Double, relative: Double) -> Double {
         guard let first = series.first, first.count >= 3 else { return 0 }
-        func rel(_ v: [Double]) -> Double {
+        func score(_ v: [Double]) -> Double {
             let m = median(v)
-            return median(v.map { abs($0 - m) }) / max(1, m)
+            let mad = median(v.map { abs($0 - m) })
+            return mad / max(absMM, relative * m)
         }
-        let worst = series.map(rel).max() ?? 1
-        return max(0, min(1, 1 - worst / 0.01)) * min(1, Double(first.count) / 5)
+        let worst = series.map(score).max() ?? 1
+        return max(0, min(1, 1 - worst)) * min(1, Double(first.count) / 5)
     }
 
     private func median(_ v: [Double]) -> Double {
@@ -510,6 +548,14 @@ final class SpaceModel: ObservableObject {
             return
         }
         let g = gapBetween((first.plane, first.point), (hit.plane, hit.point))
+        // The same surface twice is not a gap.
+        if g.gapMM < 0.5 {
+            haptic.notificationOccurred(.warning)
+            surfaces = []
+            steadiness = 0
+            hint = "Det var samme flate. Sikt på den andre flaten og trykk «Flate 2»."
+            return
+        }
         gapOut = GapOut(gap: g.gapMM, angle: g.angle)
         if g.angle >= 2 { gapMake = .wedge }
         spread = 1.5

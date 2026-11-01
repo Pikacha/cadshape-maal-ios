@@ -17,8 +17,11 @@ struct RootView: View {
 
     var body: some View {
         Group {
-            if model.isDemo {
+            if model.isDemo && model.demo != "home" {
                 ContentView(model: model)
+            } else if model.isDemo {
+                // `-demo home`: the home screen for screenshots (no PC, no printer).
+                HomeView(model: model, watch: watch) { _ in }
             } else {
                 HomeView(model: model, watch: watch) { screen = $0 }
                     .fullScreenCover(item: $screen) { s in
@@ -66,24 +69,27 @@ struct HomeView: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 18) {
                 header
-                Text("Hva vil du lage?")
-                    .font(.system(size: 34, weight: .bold, design: .rounded))
-                    .padding(.top, 4)
-                if model.pairing == nil || (model.pcOpen != true && model.connectionError != nil) {
-                    connectCard
-                }
-                bigTile
-                HStack(spacing: 12) {
-                    tile("Skann stedet", "Pek der delen skal sitte", "house", blueTint) { open(.place) }
-                    tile("Se delen i AR", watch.lastPartLabel ?? "Ekte størrelse, før print", "cube.transparent", accent) { open(.part) }
-                }
-                quickMeasure
+                // What is waiting for you comes first.
                 if let card = watch.card, card.state == "venter" {
                     approvalBanner(card)
                 }
                 if !watch.openJoints.isEmpty, watch.sawFinish {
                     JointFitCard(watch: watch)
                 }
+                if model.pairing == nil {
+                    connectCard
+                } else if model.pcOpen != true && model.connectionError != nil {
+                    offlineRow
+                }
+                Text("Hva vil du lage?")
+                    .font(.system(.largeTitle, design: .rounded).weight(.bold))
+                    .padding(.top, 4)
+                bigTile
+                HStack(spacing: 12) {
+                    tile("Skann stedet", "Pek der delen skal sitte", "house", blueTint) { open(.place) }
+                    tile("Se delen i AR", watch.lastPartLabel ?? "Ekte størrelse, før print", "cube.transparent", accent) { open(.part) }
+                }
+                quickMeasure
                 if let p = watch.printer, p.online {
                     PrinterRow(printer: p)
                 }
@@ -95,14 +101,22 @@ struct HomeView: View {
         .background(ground.ignoresSafeArea())
         .foregroundStyle(.white)
         // «Koble til» right here: log in to CadSHAPE on the web, or go to the camera for the QR code.
-        .sheet(isPresented: $model.showConnect) {
-            SettingsSheet(model: model) {
-                model.showConnect = false
+        // The camera screen opens once the sheet is gone (two presentations in one go are refused).
+        .sheet(isPresented: $model.showConnect, onDismiss: {
+            if scanQR {
+                scanQR = false
                 model.wantsPairing = true
                 open(.measure)
             }
+        }) {
+            SettingsSheet(model: model) {
+                scanQR = true
+                model.showConnect = false
+            }
         }
     }
+
+    @State private var scanQR = false
 
     private var header: some View {
         HStack {
@@ -144,7 +158,7 @@ struct HomeView: View {
                 VStack(alignment: .leading, spacing: 3) {
                     Text(model.pairing == nil ? "Koble til CadSHAPE" : (model.pcOpen == false ? "CadSHAPE er ikke åpent" : "Får ikke kontakt med CadSHAPE")).font(.headline)
                     Text(model.pairing == nil
-                         ? "Bruker du CadSHAPE på kloki.no: logg inn med samme passord. På PC-en med START_CADSHAPE_MOBIL.bat: skann QR-koden under Fil → Mål med telefonen."
+                         ? "Logg inn med CadSHAPE-passordet, eller skann QR-koden på PC-en (Fil → Mål med telefonen). Målinger lagres på telefonen til du er koblet til."
                          : (model.connectionError ?? ""))
                         .font(.subheadline)
                         .foregroundStyle(muted)
@@ -164,6 +178,22 @@ struct HomeView: View {
         .padding(16)
         .background(panel, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
         .overlay(RoundedRectangle(cornerRadius: 20, style: .continuous).stroke(accent.opacity(0.5), lineWidth: 1))
+    }
+
+    /// Paired, but CadSHAPE does not answer right now: one quiet line, not a big warning.
+    private var offlineRow: some View {
+        HStack(spacing: 10) {
+            Image(systemName: "wifi.slash").foregroundStyle(warn)
+            VStack(alignment: .leading, spacing: 1) {
+                Text(model.pcOpen == false ? "CadSHAPE er ikke åpent" : "Ingen kontakt med CadSHAPE").font(.subheadline.weight(.semibold))
+                Text("Målinger lagres og sendes senere.").font(.footnote).foregroundStyle(muted)
+            }
+            Spacer(minLength: 8)
+            Button("Koble til") { model.showConnect = true }.buttonStyle(ChipStyle())
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 8)
+        .background(panel, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
     }
 
     private var bigTile: some View {
@@ -204,23 +234,23 @@ struct HomeView: View {
 
     private var quickMeasure: some View {
         VStack(alignment: .leading, spacing: 10) {
-            Text("Mål raskt").font(.subheadline).foregroundStyle(muted)
-            ScrollView(.horizontal, showsIndicators: false) {
-                HStack(spacing: 8) {
-                    ForEach(MeasureMode.allCases) { m in
-                        Button {
-                            model.mode = m
-                            open(.measure)
-                        } label: {
-                            Label(m.short, systemImage: m.symbol)
-                                .font(.subheadline.weight(.semibold))
-                                .padding(.horizontal, 14)
-                                .frame(minHeight: 44)
-                                .background(panel, in: Capsule())
-                                .overlay(Capsule().stroke(Color.white.opacity(0.1), lineWidth: 1))
+            Text("Mål med kamera").font(.subheadline.weight(.semibold)).foregroundStyle(muted)
+            // All modes visible at once (a scrolling row hid the last ones).
+            LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 8), count: 3), spacing: 8) {
+                ForEach(MeasureMode.allCases) { m in
+                    Button {
+                        model.mode = m
+                        open(.measure)
+                    } label: {
+                        VStack(spacing: 6) {
+                            Image(systemName: m.symbol).font(.title3.weight(.semibold)).foregroundStyle(accent)
+                            Text(m.short).font(.footnote.weight(.semibold)).lineLimit(1).minimumScaleFactor(0.8)
                         }
-                        .buttonStyle(.plain)
+                        .frame(maxWidth: .infinity, minHeight: 64)
+                        .background(panel, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+                        .overlay(RoundedRectangle(cornerRadius: 16, style: .continuous).stroke(Color.white.opacity(0.08), lineWidth: 1))
                     }
+                    .buttonStyle(.plain)
                 }
             }
         }

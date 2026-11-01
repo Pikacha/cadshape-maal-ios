@@ -43,15 +43,19 @@ final class CaptureModel: ObservableObject {
     @Published var roundStart = 0
     @Published var canShoot = false
 
-    let api: CadshapeClient?
+    private let current: () -> CadshapeClient?
+    /// Always the connection the app has now (it can switch while this screen is open).
+    var api: CadshapeClient? { current() }
     private var folder: URL?
     private var timer: Timer?
     private var watching: Task<Void, Never>?
     private var observedState: ObjectCaptureSession.CaptureState?
     private var lastProgress = Date()
+    private var photogrammetry: PhotogrammetrySession?
+    private var reconTask: Task<Void, Never>?
 
-    init(api: CadshapeClient?) {
-        self.api = api
+    init(api: @escaping @autoclosure () -> CadshapeClient?) {
+        current = api
         let f = DateFormatter()
         f.dateFormat = "d.M HH:mm"
         name = "Skann \(f.string(from: Date()))"
@@ -107,9 +111,17 @@ final class CaptureModel: ObservableObject {
         shots = s.numberOfShotsTaken
         maxShots = s.maximumNumberOfInputImages
         canShoot = s.canRequestImageCapture
+        if s.userCompletedScanPass && !passDone { UINotificationFeedbackGenerator().notificationOccurred(.success) }
         passDone = s.userCompletedScanPass
         trackingHint = guidance(s)
         stalled = step == .capturing && !passDone && Date().timeIntervalSince(lastProgress) > 15
+    }
+
+    /// When the model began to be made (for «1:20» on screen).
+    private var reconstructStart = Date()
+    var elapsedText: String {
+        let s = Int(Date().timeIntervalSince(reconstructStart))
+        return String(format: "%d:%02d", s / 60, s % 60)
     }
 
     /// 0…1: how full the phone's picture budget is.
@@ -145,8 +157,10 @@ final class CaptureModel: ObservableObject {
             watching = nil
             session = nil
             step = .reconstructing(0)
-            Task { [weak self] in
+            reconstructStart = Date()
+            reconTask = Task { [weak self] in
                 try? await Task.sleep(nanoseconds: 800_000_000)
+                guard !Task.isCancelled else { return }
                 self?.reconstruct()
             }
         case .failed(let e):
@@ -221,6 +235,11 @@ final class CaptureModel: ObservableObject {
         watching?.cancel()
         watching = nil
         old?.cancel()
+        // A model being made (GBs of memory, the GPU) must stop with the screen too.
+        photogrammetry?.cancel()
+        photogrammetry = nil
+        reconTask?.cancel()
+        reconTask = nil
         if let folder { try? FileManager.default.removeItem(at: folder) }
     }
 
@@ -235,7 +254,12 @@ final class CaptureModel: ObservableObject {
         stalled = false
         roundStart = 0
         step = .starting
-        start()
+        // The old capture session lets go of the camera asynchronously; starting the new one at
+        // once could leave it hanging on «Starter kameraet».
+        Task { [weak self] in
+            try? await Task.sleep(nanoseconds: 800_000_000)
+            self?.start()
+        }
     }
 
     /// The model is made on the phone (Apple's photogrammetry), as USDZ.
@@ -248,7 +272,7 @@ final class CaptureModel: ObservableObject {
             step = .failed("Bare \(count) bilder ble tatt – for lite til en modell. Gå sakte en hel runde rundt tingen.")
             return
         }
-        Task { [weak self] in
+        reconTask = Task { [weak self] in
             do {
                 var cfg = PhotogrammetrySession.Configuration()
                 cfg.checkpointDirectory = checkpoints
@@ -256,6 +280,7 @@ final class CaptureModel: ObservableObject {
                 cfg.sampleOrdering = .sequential
                 cfg.isObjectMaskingEnabled = true
                 let ps = try PhotogrammetrySession(input: images, configuration: cfg)
+                self?.photogrammetry = ps
                 try ps.process(requests: [.modelFile(url: out)])
                 var finished = false
                 for try await output in ps.outputs {
@@ -275,12 +300,15 @@ final class CaptureModel: ObservableObject {
                             await self?.loaded(out)
                         }
                     case .processingCancelled:
+                        if Task.isCancelled { return }
                         self?.step = .failed("Modellen ble avbrutt. Prøv igjen og hold appen åpen mens den lages.")
                     default:
                         break
                     }
                 }
             } catch {
+                // Cancelled with the screen or «Skann på nytt»: not an error to show over the new scan.
+                if Task.isCancelled { return }
                 self?.step = .failed("Kunne ikke lage modellen: \(error.localizedDescription). Prøv med mer lys, matt underlag og en runde til.")
             }
         }
@@ -298,6 +326,7 @@ final class CaptureModel: ObservableObject {
         mesh = cad
         modelURL = url
         step = .done
+        UINotificationFeedbackGenerator().notificationOccurred(.success)
     }
 
     var sizeText: String {
@@ -391,10 +420,14 @@ struct ModelPreview: UIViewRepresentable {
 
 struct CaptureScreen: View {
     @StateObject private var cap: CaptureModel
+    @ObservedObject private var model: MeasureModel
+    @State private var confirmClose = false
+    @State private var connect = false
     let close: () -> Void
 
     init(model: MeasureModel, close: @escaping () -> Void) {
         self.close = close
+        self.model = model
         _cap = StateObject(wrappedValue: CaptureModel(api: model.api))
     }
 
@@ -411,20 +444,18 @@ struct CaptureScreen: View {
                 ground.ignoresSafeArea()
             }
             VStack(spacing: 10) {
-                HStack {
-                    Button {
-                        cap.cancel()
-                        close()
-                    } label: {
-                        Image(systemName: "xmark").font(.headline).frame(width: 44, height: 44).background(.ultraThinMaterial, in: Circle())
+                HStack(alignment: .top) {
+                    CloseButton(label: "Avbryt skanningen") {
+                        // Pictures or a model that has not been sent would be lost: ask first.
+                        if cap.shots > 0 && cap.sent == nil { confirmClose = true } else { leave() }
                     }
-                    .accessibilityLabel("Avbryt skanningen")
                     Spacer()
                     if cap.step == .capturing {
-                        Text("\(cap.roundShots) bilder denne runden")
+                        Text("Runde \(cap.passes)/\(CaptureModel.goodRounds) · \(cap.roundShots) bilder")
                             .font(.subheadline.weight(.semibold))
+                            .monospacedDigit()
                             .padding(.horizontal, 14)
-                            .padding(.vertical, 10)
+                            .frame(minHeight: 44)
                             .background(.ultraThinMaterial, in: Capsule())
                     }
                 }
@@ -435,153 +466,245 @@ struct CaptureScreen: View {
             .padding(.bottom, 8)
         }
         .foregroundStyle(.white)
-        .onAppear { cap.start() }
+        .confirmationDialog("Avbryte skanningen?", isPresented: $confirmClose, titleVisibility: .visible) {
+            Button("Avbryt og slett bildene", role: .destructive) { leave() }
+            Button("Fortsett", role: .cancel) {}
+        } message: {
+            Text("Bildene og modellen er ikke sendt, og blir slettet.")
+        }
+        // Its own sheet: the home screen's «Koble til» sheet sits under this full-screen cover.
+        .sheet(isPresented: $connect) {
+            SettingsSheet(model: model, allowQR: false) { connect = false }
+        }
+        .onAppear {
+            cap.start()
+            // Walking round the thing and building the model take minutes: the screen must not lock.
+            UIApplication.shared.isIdleTimerDisabled = true
+        }
         // The photos (often several hundred MB) and the model go with the screen.
-        .onDisappear { cap.cancel() }
+        .onDisappear {
+            cap.cancel()
+            UIApplication.shared.isIdleTimerDisabled = false
+        }
+    }
+
+    private func leave() {
+        cap.cancel()
+        close()
     }
 
     @ViewBuilder private var panel: some View {
         VStack(alignment: .leading, spacing: 12) {
+            if cap.step != .unsupported {
+                ScanSteps(current: stepIndex)
+            }
             switch cap.step {
             case .unsupported:
                 Text("Denne telefonen kan ikke 3D-skanne").font(.headline)
-                Text("Object Capture krever en iPhone med LiDAR og iOS 17.").font(.subheadline).opacity(0.8)
+                Text("3D-skanning krever en iPhone med LiDAR (Pro-modell) og iOS 17.").font(.subheadline).foregroundStyle(.secondary)
             case .starting:
                 HStack { ProgressView(); Text("Starter kameraet …") }
             case .ready:
                 Text("Legg tingen på et bord med plass rundt").font(.headline)
-                Text("Matt underlag og jevnt lys gir best modell. Sikt på tingen.").font(.subheadline).opacity(0.8)
+                Text("Matt underlag og jevnt lys gir best modell. Sikt på tingen.").font(.subheadline).foregroundStyle(.secondary)
                 Button("Finn tingen") { cap.detect() }.buttonStyle(PrimaryStyle())
             case .detecting:
                 Text("Juster boksen rundt tingen").font(.headline)
-                Text("Dra i hjørnene til boksen så vidt rommer den.").font(.subheadline).opacity(0.8)
+                Text("Dra i hjørnene til boksen så vidt rommer den.").font(.subheadline).foregroundStyle(.secondary)
                 Button("Start skanningen") { cap.capture() }.buttonStyle(PrimaryStyle())
             case .capturing:
-                progress
+                rounds
                 if cap.passDone {
                     Text("Runde \(cap.passes) av \(CaptureModel.goodRounds) er ferdig").font(.headline)
-                    Text("Bildet bak viser det som er skannet så langt – hull i prikkskyen er steder kameraet ikke har sett.").font(.footnote).opacity(0.75)
-                    Text(nextRoundText).font(.subheadline).opacity(0.85)
-                    HStack(spacing: 8) {
-                        Button("Ny runde") { cap.newPass() }.buttonStyle(SecondaryStyle())
-                        Button("Snu den") { cap.flip() }.buttonStyle(SecondaryStyle())
+                    Text(nextRoundText).font(.subheadline).foregroundStyle(.secondary)
+                    if cap.passes < CaptureModel.goodRounds {
+                        Button("Neste runde") { cap.newPass() }.buttonStyle(PrimaryStyle())
+                        HStack(spacing: 8) {
+                            Button("Lag modellen nå") { cap.finish() }.buttonStyle(SecondaryStyle())
+                            Button("Snu tingen") { cap.flip() }.buttonStyle(SecondaryStyle())
+                        }
+                    } else {
+                        Button("Lag modellen") { cap.finish() }.buttonStyle(PrimaryStyle())
+                        Button("En runde til") { cap.newPass() }.buttonStyle(SecondaryStyle())
                     }
-                    Button(cap.passes >= CaptureModel.goodRounds ? "Ferdig, lag modellen" : "Lag modellen nå likevel") { cap.finish() }
-                        .buttonStyle(PrimaryStyle())
                 } else {
                     Text(roundTitle).font(.headline)
-                    Text("Gå sakte rundt hele tingen og hold samme avstand. Den hvite ringen på bakken fylles der bildene er tatt – runden er ferdig når ringen er full.").font(.subheadline).opacity(0.8)
+                    message
                     HStack(spacing: 8) {
                         if cap.canShoot {
                             Button("Ta bilde") { cap.shoot() }.buttonStyle(SecondaryStyle())
                         }
                         if cap.shots >= 20 {
-                            Button("Ferdig nå") { cap.finish() }.buttonStyle(SecondaryStyle())
+                            Button("Lag modellen nå") { cap.finish() }.buttonStyle(SecondaryStyle())
                         }
+                    }
+                    if cap.stalled && cap.shots < 20 {
+                        Button("Start kameraet på nytt") { cap.again() }.buttonStyle(SecondaryStyle())
                     }
                 }
             case .finishing:
                 HStack { ProgressView(); Text("Lagrer bildene …") }
             case .reconstructing(let f):
                 Text("Lager 3D-modellen på telefonen").font(.headline)
-                ProgressView(value: f).tint(accent)
-                Text("\(Int(f * 100)) %. Det tar gjerne 1–3 minutter. Hold appen åpen.").font(.subheadline).opacity(0.8)
+                if f < 0.01 {
+                    ProgressView().tint(accent).frame(maxWidth: .infinity, alignment: .leading)
+                } else {
+                    ProgressView(value: f).tint(accent)
+                }
+                TimelineView(.periodic(from: .now, by: 1)) { _ in
+                    Text("\(Int(f * 100)) % · \(cap.elapsedText) · vanligvis 1–3 min. Ikke lukk appen.")
+                        .font(.subheadline).foregroundStyle(.secondary).monospacedDigit()
+                }
             case .done:
                 done
             case .failed(let message):
-                Text(message).font(.subheadline.weight(.semibold))
+                Label(message, systemImage: "exclamationmark.triangle.fill")
+                    .font(.subheadline.weight(.semibold)).foregroundStyle(bad)
                 Button("Prøv igjen") { cap.again() }.buttonStyle(PrimaryStyle())
             }
-            if cap.session != nil {
-                if let hint = cap.trackingHint {
-                    Label(hint, systemImage: "camera.metering.unknown")
-                        .font(.subheadline)
-                }
-                if let error = cap.error {
-                    Text(error).font(.subheadline).foregroundStyle(.orange)
-                }
-                if cap.stalled {
-                    Text("Ingen nye bilder på en stund. Gå videre rundt tingen (ikke bare vri telefonen), hold tingen midt i bildet, eller trykk «Ta bilde». Har du \(cap.shots >= 20 ? "nok bilder, trykk «Ferdig nå»." : "under 20 bilder, start på nytt med mer lys.")")
-                        .font(.footnote)
-                    if cap.shots < 20 {
-                        Button("Start kameraet på nytt") { cap.again() }.buttonStyle(SecondaryStyle())
-                    }
-                }
+            if cap.session != nil, cap.step != .capturing, let line = cap.error ?? cap.trackingHint {
+                Label(line, systemImage: cap.error != nil ? "exclamationmark.circle" : "camera.metering.unknown")
+                    .font(.subheadline)
+                    .foregroundStyle(cap.error != nil ? bad : .white)
+                    .lineLimit(3)
             }
         }
         .modifier(GlassPanel())
     }
 
-    /// Where in the scan we are: the rounds as steps, and the pictures against the phone's limit.
-    @ViewBuilder private var progress: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            HStack(spacing: 6) {
-                ForEach(1...CaptureModel.goodRounds, id: \.self) { r in
-                    Capsule()
-                        .fill(r < cap.passes || (r == cap.passes && cap.passDone) ? accent : (r == cap.passes ? Color.white.opacity(0.55) : Color.white.opacity(0.18)))
-                        .frame(height: 6)
-                }
-            }
-            HStack {
-                Text("Runde \(cap.passes) av \(CaptureModel.goodRounds)")
-                Spacer()
-                Text(cap.maxShots > 0 ? "\(cap.shots) av maks \(cap.maxShots) bilder" : "\(cap.shots) bilder")
-                    .monospacedDigit()
-            }
-            .font(.caption.weight(.semibold))
-            .opacity(0.85)
+    /// One message while walking round: error > no progress > camera advice > the instruction.
+    @ViewBuilder private var message: some View {
+        if let e = cap.error {
+            Label(e, systemImage: "exclamationmark.circle").font(.subheadline).foregroundStyle(bad).lineLimit(3)
+        } else if cap.stalled {
+            Label("Ingen nye bilder. Gå videre rundt tingen og hold den midt i bildet\(cap.canShoot ? ", eller trykk «Ta bilde»" : "").",
+                  systemImage: "pause.circle").font(.subheadline).foregroundStyle(warn).lineLimit(3)
+        } else if let hint = cap.trackingHint {
+            Label(hint, systemImage: "camera.metering.unknown").font(.subheadline).lineLimit(3)
+        } else {
+            Text("Gå sakte rundt tingen. Runden er ferdig når ringen på bakken er full.").font(.subheadline).foregroundStyle(.secondary).lineLimit(3)
         }
+    }
+
+    private var stepIndex: Int {
+        switch cap.step {
+        case .unsupported, .starting, .ready, .detecting: return 0
+        case .capturing: return 1
+        case .finishing, .reconstructing: return 2
+        case .done: return cap.sent == nil ? 3 : 4
+        case .failed: return cap.mesh == nil ? 1 : 3
+        }
+    }
+
+    /// The three rounds: the current one fills as pictures come in (a round is ~30–50 pictures).
+    private var rounds: some View {
+        HStack(spacing: 6) {
+            ForEach(1...max(CaptureModel.goodRounds, cap.passes), id: \.self) { r in
+                GeometryReader { g in
+                    ZStack(alignment: .leading) {
+                        Capsule().fill(Color.white.opacity(0.18))
+                        Capsule().fill(accent).frame(width: g.size.width * fill(r))
+                    }
+                }
+                .frame(height: 6)
+            }
+        }
+        .animation(.easeOut(duration: 0.3), value: cap.shots)
+        .accessibilityElement()
+        .accessibilityLabel("Runde \(cap.passes) av \(CaptureModel.goodRounds), \(cap.roundShots) bilder")
+    }
+
+    private func fill(_ round: Int) -> Double {
+        if round < cap.passes { return 1 }
+        if round > cap.passes { return 0 }
+        return cap.passDone ? 1 : min(0.9, Double(cap.roundShots) / 40)
     }
 
     private var roundTitle: String {
         switch cap.passes {
         case 1: return "Runde 1: rundt tingen, litt ovenfra"
         case 2: return "Runde 2: rundt tingen, i høyde med den"
-        default: return "Runde \(cap.passes): rundt tingen, lavt / undersiden"
+        default: return "Runde \(cap.passes): lavt rundt tingen"
         }
     }
 
     private var nextRoundText: String {
         switch cap.passes {
-        case 1: return "Neste: en runde i høyde med tingen. Det gir sidene skarpe. («Snu den» bare hvis bunnen må med og tingen er stiv og mønstret.)"
-        case 2: return "Neste: en lav runde, eller snu tingen for bunnen. Tre runder gir klart best modell."
-        default: return "Tingen er sett fra alle kanter. Lag modellen nå – det tar 1–3 minutter på telefonen."
+        case 1: return "Neste: en runde i høyde med tingen. «Snu tingen» bare hvis bunnen må med. Bildet bak viser hva som er skannet."
+        case 2: return "Neste: en lav runde. Tre runder gir klart best modell."
+        default: return "Tingen er sett fra alle kanter. Modellen lages på telefonen (1–3 min)."
         }
     }
 
     @ViewBuilder private var done: some View {
         if let url = cap.modelURL {
             ModelPreview(url: url)
-                .frame(height: 260)
+                .frame(height: 240)
                 .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
         }
         Text(cap.sizeText).font(.title3.bold()).monospacedDigit()
-        Text("Skannet er en referanse for formen. Mål hull og kanter som må passe nøyaktig med Hull-modus.").font(.footnote).opacity(0.75)
+        Text("Skannet viser formen (± noen mm). Mål hull som må passe nøyaktig med «Hull».").font(.footnote).foregroundStyle(.secondary)
         if let sent = cap.sent {
             Label(sent, systemImage: "checkmark.circle.fill").foregroundStyle(good).font(.headline)
             ForEach(cap.notes, id: \.self) { n in
                 Label(n, systemImage: "books.vertical").font(.subheadline)
             }
-            Text("Lag holder, lokk eller lomme rundt den i CadSHAPE – den er låst og printes ikke.").font(.footnote).opacity(0.75)
+            Button("Ferdig") { leave() }.buttonStyle(PrimaryStyle())
             Button("Skann en til") { cap.again() }.buttonStyle(SecondaryStyle())
         } else {
             TextField("Navn", text: $cap.name)
-                .textFieldStyle(.roundedBorder)
-                .foregroundStyle(.black)
+                .padding(12)
+                .background(Color.white.opacity(0.1), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
             Picker("Hva lager vi?", selection: $cap.makeHolder) {
                 Text("Holder rundt den").tag(true)
                 Text("Bare modellen").tag(false)
             }
             .pickerStyle(.segmented)
-            if let e = cap.error { Text(e).font(.subheadline).foregroundStyle(.red) }
+            if let e = cap.error {
+                Label(e, systemImage: "exclamationmark.circle").font(.subheadline).foregroundStyle(bad)
+            }
+            if !model.connected {
+                HStack {
+                    Label("Ikke koblet til CadSHAPE", systemImage: "wifi.slash").font(.subheadline)
+                    Spacer()
+                    Button("Koble til") { connect = true }.buttonStyle(ChipStyle())
+                }
+            }
             Button {
                 cap.send()
             } label: {
                 Label(cap.sending ? "Sender …" : "Send til CadSHAPE", systemImage: "paperplane.fill")
             }
             .buttonStyle(PrimaryStyle())
-            .disabled(cap.sending)
+            .disabled(cap.sending || cap.api == nil)
             Button("Skann på nytt") { cap.again() }.buttonStyle(SecondaryStyle())
         }
+    }
+}
+
+/// Finn · Skann · Lag modell · Send: where in the whole 3D scan we are.
+struct ScanSteps: View {
+    let current: Int
+    private let names = ["Finn", "Skann", "Lag modell", "Send"]
+
+    var body: some View {
+        HStack(spacing: 6) {
+            ForEach(names.indices, id: \.self) { i in
+                HStack(spacing: 4) {
+                    Image(systemName: i < current ? "checkmark.circle.fill" : (i == current ? "circle.inset.filled" : "circle"))
+                        .foregroundStyle(i <= current ? accent : Color.white.opacity(0.35))
+                    Text(names[i])
+                        .foregroundStyle(i == current ? .white : .secondary)
+                }
+                if i < names.count - 1 {
+                    Rectangle().fill(Color.white.opacity(0.2)).frame(height: 1)
+                }
+            }
+        }
+        .font(.caption.weight(.semibold))
+        .lineLimit(1)
+        .minimumScaleFactor(0.8)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("Steg \(min(current + 1, names.count)) av \(names.count): \(names[min(current, names.count - 1)])")
     }
 }

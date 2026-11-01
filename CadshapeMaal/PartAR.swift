@@ -26,7 +26,9 @@ final class PartARModel: ObservableObject {
     @Published var clearance: Clearance?
     @Published var sent: String?
 
-    let api: CadshapeClient?
+    private let current: () -> CadshapeClient?
+    /// Always the connection the app has now (it can switch while this screen is open).
+    var api: CadshapeClient? { current() }
     weak var arView: ARView?
     /// The part in RealityKit's local space (m, Y up), bottom at 0.
     private(set) var local: TriangleMesh?
@@ -38,8 +40,8 @@ final class PartARModel: ObservableObject {
     private var checking = false
     private var lastCheck: TimeInterval = 0
 
-    init(api: CadshapeClient?) {
-        self.api = api
+    init(api: @escaping @autoclosure () -> CadshapeClient?) {
+        current = api
     }
 
     var chosenName: String {
@@ -281,10 +283,7 @@ struct PartARScreen: View {
             PartARView(model: ar).ignoresSafeArea()
             VStack(spacing: 10) {
                 HStack(spacing: 8) {
-                    Button(action: close) {
-                        Image(systemName: "chevron.left").font(.headline).frame(width: 44, height: 44).background(.ultraThinMaterial, in: Circle())
-                    }
-                    .accessibilityLabel("Tilbake")
+                    CloseButton(action: close)
                     Text(ar.chosen == nil ? "Se delen i AR" : "\(ar.chosenName), ekte størrelse")
                         .font(.subheadline.weight(.semibold))
                         .lineLimit(1)
@@ -297,7 +296,12 @@ struct PartARScreen: View {
                 partChips
                 Spacer()
                 if let e = ar.error {
-                    Text(e).font(.subheadline.weight(.semibold)).padding(12).background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 14))
+                    Label(e, systemImage: "exclamationmark.circle")
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundStyle(bad)
+                        .padding(12)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 14))
                 }
                 bottom
             }
@@ -305,7 +309,11 @@ struct PartARScreen: View {
             .padding(.bottom, 8)
         }
         .foregroundStyle(.white)
-        .onAppear { ar.loadParts() }
+        .onAppear {
+            ar.loadParts()
+            UIApplication.shared.isIdleTimerDisabled = true
+        }
+        .onDisappear { UIApplication.shared.isIdleTimerDisabled = false }
         .sheet(isPresented: $showCard) { ApprovalSheet(watch: watch) }
         .onChange(of: ar.chosen) { watch.lastPartLabel = ar.chosenName }
     }
@@ -342,7 +350,7 @@ struct PartARScreen: View {
         VStack(alignment: .leading, spacing: 12) {
             Label(ar.clearanceText, systemImage: ar.clearanceIsBad ? "exclamationmark.triangle.fill" : "ruler")
                 .font(.headline)
-                .foregroundStyle(ar.clearanceIsBad ? Color(red: 1, green: 0.56, blue: 0.53) : Color.white)
+                .foregroundStyle(ar.clearanceIsBad ? bad : Color.white)
             if ar.placed {
                 HStack(spacing: 8) {
                     Button { ar.turn(across: false) } label: { Label("Vri 90°", systemImage: "rotate.right") }.buttonStyle(SecondaryStyle())

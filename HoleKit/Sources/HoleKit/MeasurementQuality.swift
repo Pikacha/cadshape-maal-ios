@@ -20,7 +20,8 @@ public func measurementQuality(_ measurements: [FrameMeasurement], trackingNorma
     let width = spread(recent.map(\.widthMM)), height = spread(recent.map(\.heightMM))
     let relative = max(width.deviation / width.median, height.deviation / height.median)
     var steady = max(0, min(1, 1 - relative / 0.02)) * min(1, Double(recent.count) / 6)
-    if max(width.range / width.median, height.range / height.median) > 0.04 { steady = 0 }
+    // One wild frame: unsteady. At least 0,3 mm leeway, or a 10 mm hole could never be steady.
+    if width.range > max(0.04 * width.median, 0.3) || height.range > max(0.04 * height.median, 0.3) { steady = 0 }
     let resolution = recent.map { $0.edgeResolutionMM * ($0.source == .depth ? 2 : 1) }.max() ?? .infinity
     let surface = recent.map { m -> Double in
         let size = max(m.widthMM, m.heightMM)

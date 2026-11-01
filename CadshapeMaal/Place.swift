@@ -20,12 +20,14 @@ final class PlaceModel: ObservableObject {
     @Published var error: String?
     @Published var meshReady = false
 
-    let api: CadshapeClient?
+    private let current: () -> CadshapeClient?
+    /// Always the connection the app has now (it can switch while this screen is open).
+    var api: CadshapeClient? { current() }
     weak var arView: ARView?
     private var markers: [AnchorEntity] = []
 
-    init(api: CadshapeClient?) {
-        self.api = api
+    init(api: @escaping @autoclosure () -> CadshapeClient?) {
+        current = api
         meshReady = ARWorldTrackingConfiguration.supportsSceneReconstruction(.mesh)
     }
 
@@ -202,10 +204,7 @@ struct PlaceScreen: View {
             Crosshair().allowsHitTesting(false)
             VStack(spacing: 10) {
                 HStack(spacing: 8) {
-                    Button(action: close) {
-                        Image(systemName: "chevron.left").font(.headline).frame(width: 44, height: 44).background(.ultraThinMaterial, in: Circle())
-                    }
-                    .accessibilityLabel("Tilbake")
+                    CloseButton(action: close)
                     Text("Skann stedet").font(.subheadline.weight(.semibold)).padding(.horizontal, 14).padding(.vertical, 10).background(.ultraThinMaterial, in: Capsule())
                     Spacer()
                     ForEach(0..<place.picks.count, id: \.self) { i in
@@ -224,6 +223,15 @@ struct PlaceScreen: View {
             .padding(.bottom, 8)
         }
         .foregroundStyle(.white)
+        .onAppear { UIApplication.shared.isIdleTimerDisabled = true }
+        .onDisappear { UIApplication.shared.isIdleTimerDisabled = false }
+    }
+
+    /// Why «Send» cannot be pressed, said instead of a dead button.
+    private var sendBlocker: String? {
+        if !place.meshReady { return "Telefonen mangler LiDAR-nett – stedet kan ikke sendes som 3D." }
+        if place.api == nil { return "Ikke koblet til CadSHAPE – koble til fra startskjermen." }
+        return nil
     }
 
     private var sheet: some View {
@@ -238,8 +246,13 @@ struct PlaceScreen: View {
                 ForEach(place.facts, id: \.self) { Text($0).font(.subheadline.weight(.semibold)) }
             }
             HStack(spacing: 8) {
-                Button { place.pick() } label: { Label(place.picks.count < 2 ? "Velg flaten i krysset" : "Velg på nytt", systemImage: "scope") }
-                    .buttonStyle(PrimaryStyle())
+                if place.picks.isEmpty {
+                    Button { place.pick() } label: { Label("Velg flaten i krysset", systemImage: "scope") }
+                        .buttonStyle(PrimaryStyle())
+                } else {
+                    Button { place.pick() } label: { Label(place.picks.count < 2 ? "Velg flate 2" : "Velg på nytt", systemImage: "scope") }
+                        .buttonStyle(SecondaryStyle())
+                }
                 if !place.picks.isEmpty {
                     Button { place.undo() } label: { Image(systemName: "arrow.uturn.backward") }
                         .buttonStyle(SecondaryStyle())
@@ -248,8 +261,8 @@ struct PlaceScreen: View {
                 }
             }
             TextField("Hva skal sitte her?", text: $place.want)
-                .textFieldStyle(.roundedBorder)
-                .foregroundStyle(.black)
+                .padding(12)
+                .background(Color.white.opacity(0.1), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
                 .focused($typing)
             ScrollView(.horizontal, showsIndicators: false) {
                 HStack(spacing: 8) {
@@ -263,13 +276,18 @@ struct PlaceScreen: View {
                     }
                 }
             }
-            if let e = place.error { Text(e).font(.subheadline).foregroundStyle(Color(red: 1, green: 0.56, blue: 0.53)) }
+            if let e = place.error { Label(e, systemImage: "exclamationmark.circle").font(.subheadline).foregroundStyle(bad) }
             if let s = place.sent {
                 Label(s, systemImage: "checkmark.circle.fill").foregroundStyle(good).font(.subheadline.weight(.semibold))
+                Button("Ferdig", action: close).buttonStyle(PrimaryStyle())
+            } else if !place.picks.isEmpty {
+                if let why = sendBlocker {
+                    Label(why, systemImage: "info.circle").font(.footnote).foregroundStyle(.secondary)
+                }
+                Button { place.send() } label: { Label(place.sending ? "Sender …" : "Send stedet til CadSHAPE", systemImage: "paperplane.fill") }
+                    .buttonStyle(PrimaryStyle(enabled: sendBlocker == nil && !place.sending))
+                    .disabled(place.sending || sendBlocker != nil)
             }
-            Button { place.send() } label: { Label(place.sending ? "Sender …" : "Send stedet til CadSHAPE", systemImage: "paperplane.fill") }
-                .buttonStyle(SecondaryStyle())
-                .disabled(place.sending || !place.meshReady)
         }
         .modifier(GlassPanel())
     }

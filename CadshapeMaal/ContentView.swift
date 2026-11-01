@@ -4,6 +4,29 @@ import UIKit
 
 let accent = Color(red: 0.95, green: 0.66, blue: 0.23)
 let good = Color(red: 0.36, green: 0.85, blue: 0.55)
+/// Something to look at (not an error): yellow, not the orange of the buttons.
+let warn = Color(red: 1.0, green: 0.82, blue: 0.36)
+/// Errors – always this, never the button orange.
+let bad = Color(red: 1.0, green: 0.45, blue: 0.42)
+
+/// Back / cancel on every full-screen view: the same 44 pt round button top left.
+struct CloseButton: View {
+    var label = "Tilbake"
+    var icon = "xmark"
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            Image(systemName: icon)
+                .font(.headline)
+                .frame(width: 44, height: 44)
+                .background(.ultraThinMaterial, in: Circle())
+                .contentShape(Circle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(label)
+    }
+}
 
 /// Measuring with the camera (holes, patterns, boxes, things, pipes, gaps) – one of the screens under «Hjem».
 struct ContentView: View {
@@ -22,15 +45,8 @@ struct ContentView: View {
             VStack(spacing: 12) {
                 HStack(spacing: 8) {
                     if let onHome {
-                        Button(action: onHome) {
-                            Image(systemName: "house.fill")
-                                .font(.footnote.weight(.semibold))
-                                .frame(width: 36, height: 36)
-                                .background(.ultraThinMaterial, in: Circle())
-                        }
-                        .buttonStyle(.plain)
-                        .accessibilityLabel("Til start")
-                        .padding(.top, 4)
+                        CloseButton(label: "Til start", action: onHome)
+                            .padding(.top, 4)
                     }
                     TopBar(model: model)
                 }
@@ -151,7 +167,7 @@ struct TopBar: View {
                     Image(systemName: "chevron.down").font(.caption2.weight(.bold)).opacity(0.7)
                 }
                 .padding(.horizontal, 12)
-                .padding(.vertical, 8)
+                .frame(minHeight: 44)
                 .background(.ultraThinMaterial, in: Capsule())
             }
             .buttonStyle(.plain)
@@ -164,21 +180,21 @@ struct TopBar: View {
                     if !store.waiting.isEmpty { Text("\(store.waiting.count)").monospacedDigit() }
                 }
                 .font(.footnote.weight(.semibold))
-                .padding(.horizontal, 12)
-                .padding(.vertical, 8)
+                .padding(.horizontal, 14)
+                .frame(minHeight: 44)
                 .background(store.waiting.isEmpty ? AnyShapeStyle(.ultraThinMaterial) : AnyShapeStyle(accent.opacity(0.85)), in: Capsule())
                 .foregroundStyle(store.waiting.isEmpty ? Color.white : Color.black)
             }
             .buttonStyle(.plain)
             .accessibilityLabel("Lagrede målinger")
-            HStack(spacing: 5) {
-                Image(systemName: model.hasLidar ? "dot.radiowaves.left.and.right" : "camera")
-                Text(model.hasLidar ? "LiDAR" : "Uten LiDAR")
+            // Only worth saying when it is missing: then holes and boxes are measured coarser.
+            if !model.hasLidar && !model.isDemo {
+                Label("Uten dybdesensor", systemImage: "camera")
+                    .font(.footnote.weight(.semibold))
+                    .padding(.horizontal, 12)
+                    .frame(minHeight: 44)
+                    .background(.ultraThinMaterial, in: Capsule())
             }
-            .font(.footnote.weight(.semibold))
-            .padding(.horizontal, 12)
-            .padding(.vertical, 8)
-            .background(.ultraThinMaterial, in: Capsule())
         }
         .padding(.top, 4)
     }
@@ -274,7 +290,7 @@ struct SizeHeader: View {
         VStack(alignment: .leading, spacing: 2) {
             HStack(alignment: .firstTextBaseline) {
                 Text(text)
-                    .font(.system(size: 32, weight: .bold, design: .rounded))
+                    .font(.system(.largeTitle, design: .rounded).weight(.bold))
                     .monospacedDigit()
                     .lineLimit(1)
                     .minimumScaleFactor(0.6)
@@ -282,9 +298,9 @@ struct SizeHeader: View {
                 if busy { ProgressView() } else if let label { Text(label).font(.caption.weight(.semibold)).opacity(0.7) }
             }
             if let sure {
-                Label(unsure ? "\(sure) – kontrollmål anbefales" : sure, systemImage: unsure ? "exclamationmark.triangle.fill" : "scope")
+                Label(unsure ? "\(sure) – mål gjerne med skyvelære" : sure, systemImage: unsure ? "exclamationmark.triangle.fill" : "scope")
                     .font(.footnote.weight(.semibold))
-                    .foregroundStyle(unsure ? accent : Color.white.opacity(0.75))
+                    .foregroundStyle(unsure ? warn : Color.white.opacity(0.75))
             }
         }
     }
@@ -296,12 +312,18 @@ struct LiveContent: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             ModePicker(model: model)
-            SizeHeader(text: model.answer?.text ?? model.quick ?? "Sikt på hullet", sure: model.uncertaintyText, unsure: model.unsure, label: model.answer?.label)
+            SizeHeader(text: model.answer?.text ?? model.quick ?? "– mm", sure: model.uncertaintyText, unsure: model.unsure, label: model.answer?.label)
+                .foregroundStyle(model.live == nil ? Color.white.opacity(0.45) : Color.white)
+            // Right under the number, a fixed two-line slot: the panel no longer jumps as the hint changes.
+            Text(model.hint)
+                .font(.subheadline.weight(.semibold))
+                .foregroundStyle(model.live == nil ? Color.white : (model.steadiness > 0.7 ? good : warn))
+                .lineLimit(2)
+                .frame(maxWidth: .infinity, minHeight: 40, alignment: .topLeading)
             if !model.details.isEmpty {
-                Text(model.details).font(.footnote).opacity(0.75)
+                Text(model.details).font(.footnote).foregroundStyle(.secondary)
             }
             SteadyBar(value: model.steadiness)
-            Text(model.hint).font(.subheadline.weight(.medium)).foregroundStyle(model.steadiness > 0.7 ? good : accent)
             if model.mode == .pattern {
                 PatternLive(model: model)
             } else {
@@ -705,11 +727,22 @@ struct SettingsSheet: View {
     @State private var password = ""
     @State private var loggingIn = false
     @State private var loginError: String?
-    private let login = WebLogin()
+    @Environment(\.dismiss) private var dismiss
+    /// One for the app: the sheet's view is rebuilt often, and each URLSession would live on.
+    private static let login = WebLogin()
+    /// Where there is no camera route (the 3D scan), «Skann QR-koden» is left out.
+    private let allowQR: Bool
 
-    init(model: MeasureModel, onScanQR: (() -> Void)? = nil) {
+    init(model: MeasureModel, allowQR: Bool = true, onScanQR: (() -> Void)? = nil) {
         self.model = model
+        self.allowQR = allowQR
         self.onScanQR = onScanQR
+    }
+
+    private func close() {
+        model.showSettings = false
+        model.showConnect = false
+        dismiss()
     }
 
     var body: some View {
@@ -742,12 +775,13 @@ struct SettingsSheet: View {
                         }
                         loggingIn = true
                         loginError = nil
-                        login.login(base: base, password: password) { r in
+                        Self.login.login(base: base, password: password) { r in
                             loggingIn = false
                             switch r {
                             case .success(let session):
                                 password = ""
                                 model.loggedIn(base: base, session: session)
+                                close()
                             case .failure(let e):
                                 loginError = e.message
                             }
@@ -760,7 +794,7 @@ struct SettingsSheet: View {
                     }
                     .disabled(password.isEmpty || loggingIn)
                     if let loginError {
-                        Text(loginError).font(.footnote).foregroundStyle(accent)
+                        Text(loginError).font(.footnote).foregroundStyle(bad)
                     }
                 } header: {
                     Text("CadSHAPE på nett")
@@ -768,15 +802,17 @@ struct SettingsSheet: View {
                     Text("Virker hvor som helst med nett, uten .bat-fil og QR-kode. Passordet lagres ikke; innloggingen huskes i 90 dager. Delene lages i CadSHAPE som er åpent i en nettleser.")
                 }
                 Section {
-                    Button {
-                        if let onScanQR {
-                            onScanQR()
-                        } else {
-                            model.showSettings = false
-                            model.wantsPairing = true
+                    if allowQR {
+                        Button {
+                            if let onScanQR {
+                                onScanQR()
+                            } else {
+                                model.showSettings = false
+                                model.wantsPairing = true
+                            }
+                        } label: {
+                            Label("Skann QR-koden", systemImage: "qrcode.viewfinder")
                         }
-                    } label: {
-                        Label("Skann QR-koden", systemImage: "qrcode.viewfinder")
                     }
                     TextField("https://192.168.…:5192/maal.html?k=…", text: $link)
                         .textInputAutocapitalization(.never)
@@ -791,18 +827,21 @@ struct SettingsSheet: View {
                         }
                     }
                     if badLink {
-                        Text("Lenken må være den fra QR-koden i CadSHAPE (med ?k=…).").font(.footnote).foregroundStyle(accent)
+                        Text("Lenken må være den fra QR-koden i CadSHAPE (med ?k=…).").font(.footnote).foregroundStyle(bad)
                     }
                 } header: {
                     Text("PC-en på samme wifi")
                 }
-                CalibrationSection(model: model)
+                // Calibrating needs the measuring camera: only offered from that screen.
+                if onScanQR == nil {
+                    CalibrationSection(model: model)
+                }
                 Section {
                     Toggle("Lås av seg selv når målet er stødig", isOn: $model.autoLock)
                 } header: {
                     Text("Måling")
                 } footer: {
-                    Text("Låser bare når bildene er stødige, kamerasporet er normalt og oppløsningen er god nok. En grov LiDAR-kant låses manuelt og bør kontrolleres før presspasning.")
+                    Text("Låser bare når målet er stødig og skarpt nok. Er kanten grov, låser du selv – mål med skyvelære før deler som skal sitte stramt.")
                 }
                 Section("Slik måler appen") {
                     Text("Kanten på hullet finnes i kamerabildet (eller i LiDAR-dybden når hullet ikke skiller seg ut). LiDAR måler flaten rundt hullet – avstand og vinkel – og kanten legges ned på flaten i millimeter. Anslått avvik tar med variasjon, pikseloppløsning og flaten. Det er ikke en kalibrert garanti for passform. Bruk kontrollmål for små, trange hull. LiDAR kan også anslå dybden.")
@@ -820,10 +859,7 @@ struct SettingsSheet: View {
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .confirmationAction) {
-                    Button("Ferdig") {
-                        model.showSettings = false
-                        model.showConnect = false
-                    }
+                    Button("Ferdig") { close() }
                 }
             }
         }
@@ -864,9 +900,12 @@ struct ChipStyle: ButtonStyle {
         configuration.label
             .font(.footnote.weight(.semibold))
             .padding(.horizontal, 10)
-            .padding(.vertical, 6)
+            .padding(.vertical, 8)
             .background(on ? accent : Color.white.opacity(configuration.isPressed ? 0.25 : 0.14), in: Capsule())
             .foregroundStyle(on ? Color.black : Color.white)
+            // The chip looks small; the finger gets 44 pt.
+            .frame(minHeight: 44)
+            .contentShape(Rectangle())
     }
 }
 
@@ -874,8 +913,10 @@ struct RoundStyle: ButtonStyle {
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
             .font(.subheadline.weight(.bold))
-            .frame(width: 34, height: 34)
+            .frame(width: 38, height: 38)
             .background(Color.white.opacity(configuration.isPressed ? 0.28 : 0.14), in: Circle())
             .foregroundStyle(Color.white)
+            .frame(width: 44, height: 44)
+            .contentShape(Circle())
     }
 }

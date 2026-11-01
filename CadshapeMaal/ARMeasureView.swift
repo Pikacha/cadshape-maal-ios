@@ -78,11 +78,27 @@ final class Measurer: NSObject, ARSessionDelegate {
             config.frameSemantics.insert(.smoothedSceneDepth)
         }
         model.hasLidar = ARWorldTrackingConfiguration.supportsFrameSemantics(.sceneDepth)
+        // An old camera error (e.g. the camera still busy right after the 3D scan) is gone now.
+        model.fatal = nil
+        // New tracking = a new world: holes of an unfinished pattern would no longer line up.
+        if !model.pattern.isEmpty && !model.patternLocked { model.newPattern() }
         view?.session.run(config, options: [.resetTracking, .removeExistingAnchors])
+        // Back on a locked measurement: no need for the camera (battery) until «Mål på nytt».
+        if model.locked || model.patternLocked || model.space.locked { view?.session.pause() }
     }
 
+    private var retried = false
+
     func session(_ session: ARSession, didFailWithError error: Error) {
-        DispatchQueue.main.async { self.model.fatal = "Kameraet stoppet: \(error.localizedDescription)" }
+        DispatchQueue.main.async {
+            // Often the camera was just held by another screen: try once more before giving up.
+            if !self.retried, let config = self.config {
+                self.retried = true
+                DispatchQueue.main.asyncAfter(deadline: .now() + 1) { session.run(config, options: [.resetTracking]) }
+                return
+            }
+            self.model.fatal = "Kameraet stoppet: \(error.localizedDescription). Gå tilbake til start og åpne på nytt."
+        }
     }
 
     func session(_ session: ARSession, didUpdate frame: ARFrame) {
@@ -93,10 +109,12 @@ final class Measurer: NSObject, ARSessionDelegate {
         // The pattern's holes follow the camera on screen.
         if let view, !model.pattern.isEmpty, frame.timestamp - lastProjected > 0.05 {
             lastProjected = frame.timestamp
-            model.patternOnScreen = model.pattern.map { e in
+            let points = model.pattern.map { e -> CGPoint? in
                 let p = view.projectPoint(SCNVector3(e.world.x, e.world.y, e.world.z))
                 return p.z > 0 && p.z < 1 ? CGPoint(x: CGFloat(p.x), y: CGFloat(p.y)) : nil
             }
+            // Only publish a change: every write redraws the whole screen.
+            if points != model.patternOnScreen { model.patternOnScreen = points }
         }
         let mode = model.mode
         let spaceMode = mode.isSpace && !model.space.locked && !model.wantsPairing
@@ -207,11 +225,10 @@ final class Measurer: NSObject, ARSessionDelegate {
     }
 
     private func refreshOutline(_ frame: ARFrame) {
-        guard case .normal = frame.camera.trackingState else {
-            model.outlineOnScreen = []
-            return
-        }
-        model.outlineOnScreen = projectedOutline(frame)
+        var points: [CGPoint] = []
+        if case .normal = frame.camera.trackingState { points = projectedOutline(frame) }
+        // 20 times a second: only publish when it changed (an unchanged write still redraws everything).
+        if points != model.outlineOnScreen { model.outlineOnScreen = points }
     }
 
     private func projectedOutline(_ frame: ARFrame) -> [CGPoint] {
@@ -241,12 +258,17 @@ extension Measurer {
 
     /// The point cloud of the last frames and the box, object, pipe or surface in it. Nil without LiDAR.
     fileprivate func measureSpace(_ frame: ARFrame, seed: CGPoint, generation: Int, mode: MeasureMode) -> SpaceResult? {
+        // Points from a camera that has lost its place (or moves fast) land in the wrong spot in
+        // the world and double the walls: skip such frames (counts as one miss).
+        guard case .normal = frame.camera.trackingState else { return nil }
         guard let data = frame.smoothedSceneDepth ?? frame.sceneDepth, let dm = FrameReader.depth(data) else { return nil }
         let K = FrameReader.intrinsics(frame.camera)
         let pose = FrameReader.pose(frame.camera)
         let iw = Double(frame.camera.imageResolution.width)
         let ih = Double(frame.camera.imageResolution.height)
         if cloud.generation != generation { cloud.reset(generation) }
+        // A big jump since the last frame (moved > 10 cm or turned > 15°): start the cloud again.
+        cloud.follow(pose)
         cloud.add(cloudPoints(dm, intrinsics: K, imageWidth: iw, imageHeight: ih, pose: pose))
         // Held upright, the screen's right is the camera's y axis (its picture lies on its side).
         let right = pose.y
@@ -293,9 +315,21 @@ final class PointCloudFrames {
     private var frames: [[V3]] = []
     private let keep = 5
 
+    private var lastPose: CameraPose?
+
     func reset(_ g: Int) {
         generation = g
         frames = []
+        lastPose = nil
+    }
+
+    /// Drops the old frames when the phone has moved a lot since the last one.
+    func follow(_ pose: CameraPose) {
+        defer { lastPose = pose }
+        guard let last = lastPose else { return }
+        let moved = simd_length(pose.position - last.position)
+        let turned = acos(max(-1, min(1, simd_dot(pose.z, last.z)))) * 180 / .pi
+        if moved > 0.10 || turned > 15 { frames = [] }
     }
 
     func add(_ pts: [V3]) {

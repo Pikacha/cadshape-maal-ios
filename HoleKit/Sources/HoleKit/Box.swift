@@ -57,7 +57,7 @@ public func cloudPoints(_ dm: DepthMap, intrinsics K: Intrinsics, imageWidth: Do
         while i < dm.width {
             let k = j * dm.width + i
             let z = dm.depth[k]
-            if dm.valid(k), z < maxDistance, (dm.confidence?[k] ?? 2) >= minConfidence {
+            if dm.valid(k), z < maxDistance, (dm.confidence?[k] ?? 2) >= minConfidence, !flying(dm, i, j, z) {
                 let ray = K.ray((Double(i) + 0.5) * sx, (Double(j) + 0.5) * sy)
                 out.append(pose.world(ray * Double(z)))
             }
@@ -66,6 +66,24 @@ public func cloudPoints(_ dm: DepthMap, intrinsics K: Intrinsics, imageWidth: Do
         j += step
     }
     return out
+}
+
+/// A "flying pixel": at the outline of a thing the depth sensor mixes the near and the far
+/// surface and gives points hanging in the air between them. They make a thing's footprint grow
+/// and a box's walls move in. Such a pixel lies clearly between its two neighbours along a row or
+/// a column (one much nearer, one much farther). A real edge pixel is close to one side, and a
+/// wall seen at a slant changes far less per pixel, so both stay.
+func flying(_ dm: DepthMap, _ i: Int, _ j: Int, _ z: Float) -> Bool {
+    let limit = max(Float(0.025), 0.05 * z)
+    for (di, dj) in [(1, 0), (0, 1)] {
+        let a = (i - di, j - dj), b = (i + di, j + dj)
+        guard a.0 >= 0, a.1 >= 0, b.0 < dm.width, b.1 < dm.height else { continue }
+        let ka = a.1 * dm.width + a.0, kb = b.1 * dm.width + b.0
+        guard dm.valid(ka), dm.valid(kb) else { continue }
+        let da = dm.depth[ka] - z, db = dm.depth[kb] - z
+        if abs(da) > limit && abs(db) > limit && da * db < 0 { return true }
+    }
+    return false
 }
 
 /// The world point under a picture point (full-picture pixels): median depth of a small patch.

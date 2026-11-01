@@ -155,7 +155,16 @@ final class CadshapeClient: NSObject, URLSessionDelegate {
         return r
     }
 
+    /// A screen that still holds this client after the app switched connection (PC → web, logged in
+    /// again, «Glem PC»): a new task on an invalidated session would crash the app. Say so instead.
+    private func refusedWhenDead<T>(_ done: @escaping (Result<T, ClientError>) -> Void) -> Bool {
+        guard dead else { return false }
+        DispatchQueue.main.async { done(.failure(.offline("Tilkoblingen ble byttet. Prøv igjen."))) }
+        return true
+    }
+
     private func call(_ r: URLRequest, done: @escaping (Result<[String: Any], ClientError>) -> Void) {
+        if refusedWhenDead(done) { return }
         session.dataTask(with: r) { data, response, error in
             let result: Result<[String: Any], ClientError>
             if let error = error as NSError? {
@@ -351,6 +360,7 @@ extension CadshapeClient {
 
     /// GET raw bytes (a part as STL, a camera picture). A JSON answer means an error.
     func getData(_ path: String, query: [String: String] = [:], timeout: TimeInterval = 120, done: @escaping (Result<Data, ClientError>) -> Void) {
+        if refusedWhenDead(done) { return }
         let r = request(path, query: query, timeout: timeout)
         session.dataTask(with: r) { data, response, error in
             let result: Result<Data, ClientError>
