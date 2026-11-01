@@ -473,7 +473,7 @@ struct LockedContent: View {
                 Button {
                     model.useDepth()
                 } label: {
-                    Label("Hullet er \(Int(depth.rounded())) mm dypt (LiDAR) – bruk som dybde", systemImage: "arrow.down.to.line")
+                    Label("Bruk hullets dybde: \(Int(depth.rounded())) mm", systemImage: "arrow.down.to.line")
                         .font(.footnote.weight(.semibold))
                 }
                 .buttonStyle(ChipStyle(on: false))
