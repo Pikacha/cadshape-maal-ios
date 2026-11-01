@@ -33,30 +33,77 @@ final class PlaceModel: ObservableObject {
 
     /// The surface in the cross-hair.
     func pick() {
-        guard let arView else { return }
+        // While sending, the picks are what is being sent: changing them would make «Sendt» wrong.
+        guard let arView, !sending else { return }
         let c = CGPoint(x: arView.bounds.midX, y: arView.bounds.midY)
-        guard let hit = arView.raycast(from: c, allowing: .estimatedPlane, alignment: .any).first else {
+        // A plane ARKit has found (its real extent) first; its estimate only where there is none.
+        guard let hit = arView.raycast(from: c, allowing: .existingPlaneGeometry, alignment: .any).first
+                ?? arView.raycast(from: c, allowing: .estimatedPlane, alignment: .any).first else {
             error = "Fant ingen flate i krysset. Gå litt nærmere, eller sikt på en flatere del."
             return
         }
         error = nil
+        // A new pick changes what would be sent: the old «Sendt» no longer holds.
+        sent = nil
         let t = hit.worldTransform
-        let p = PickedSurface(point: SIMD3<Float>(t.columns.3.x, t.columns.3.y, t.columns.3.z), normal: simd_normalize(SIMD3<Float>(t.columns.1.x, t.columns.1.y, t.columns.1.z)))
+        let point = SIMD3<Float>(t.columns.3.x, t.columns.3.y, t.columns.3.z)
+        var normal = simd_normalize(SIMD3<Float>(t.columns.1.x, t.columns.1.y, t.columns.1.z))
+        if let anchors = arView.session.currentFrame?.anchors.compactMap({ $0 as? ARMeshAnchor }), !anchors.isEmpty,
+           let refined = meshNormal(anchors, near: point, roughly: normal) {
+            normal = refined
+        }
+        let p = PickedSurface(point: point, normal: normal)
         // A third pick replaces the second.
         if picks.count >= 2 { undo() }
         picks.append(p)
-        let a = AnchorEntity(world: t)
+        let a = AnchorEntity(world: point)
         let disk = ModelEntity(mesh: .generateBox(width: 0.05, height: 0.002, depth: 0.05, cornerRadius: 0.012), materials: [SimpleMaterial(color: picks.count == 1 ? UIColor(red: 0.35, green: 0.64, blue: 0.90, alpha: 0.7) : UIColor(red: 0.95, green: 0.66, blue: 0.23, alpha: 0.75), isMetallic: false)])
+        // The disk lies flat on the surface as measured (the refined normal), not as raycast.
+        disk.orientation = simd_quatf(from: SIMD3<Float>(0, 1, 0), to: normal)
         a.addChild(disk)
         arView.scene.addAnchor(a)
         markers.append(a)
         UIImpactFeedbackGenerator(style: .medium).impactOccurred()
     }
 
+    /// The surface's normal from the LiDAR mesh round the hit: a plane fitted (HoleKit `fitPlane`)
+    /// to the mesh corners within 4 cm. Nil when there are too few or they disagree with the raycast
+    /// by more than 25° (a corner or an edge right there).
+    private func meshNormal(_ anchors: [ARMeshAnchor], near point: SIMD3<Float>, roughly guess: SIMD3<Float>) -> SIMD3<Float>? {
+        let radius: Float = 0.04
+        var pts: [V3] = []
+        for a in anchors {
+            let t = a.transform
+            // Mesh anchors cover a few metres each: skip those far away without reading them.
+            if simd_distance(SIMD3<Float>(t.columns.3.x, t.columns.3.y, t.columns.3.z), point) > 6 { continue }
+            let vs = a.geometry.vertices
+            let base = vs.buffer.contents()
+            for i in 0..<vs.count {
+                let v = base.advanced(by: vs.offset + vs.stride * i).assumingMemoryBound(to: Float.self)
+                let w4 = t * SIMD4<Float>(v[0], v[1], v[2], 1)
+                let w = SIMD3<Float>(w4.x, w4.y, w4.z)
+                if simd_distance(w, point) <= radius {
+                    // Round the hit (not the world origin): better numbers for the fit.
+                    let d = w - point
+                    pts.append(V3(Double(d.x), Double(d.y), Double(d.z)))
+                }
+            }
+        }
+        guard let fit = fitPlane(pts, threshold: 0.006) else { return nil }
+        var n = SIMD3<Float>(Float(fit.plane.normal.x), Float(fit.plane.normal.y), Float(fit.plane.normal.z))
+        guard n.x.isFinite, n.y.isFinite, n.z.isFinite, simd_length(n) > 0.5 else { return nil }
+        n = simd_normalize(n)
+        // A fitted plane's normal can point either way: the side the raycast says faces out.
+        if simd_dot(n, guess) < 0 { n = -n }
+        return simd_dot(n, guess) > cos(Float(25 * Double.pi / 180)) ? n : nil
+    }
+
     func undo() {
-        guard !picks.isEmpty else { return }
+        guard !picks.isEmpty, !sending else { return }
         picks.removeLast()
         markers.popLast()?.removeFromParent()
+        sent = nil
+        error = nil
     }
 
     var angle: Double? {
@@ -73,7 +120,8 @@ final class PlaceModel: ObservableObject {
     /// What CadSHAPE gets as notes (and «Beskriv det» can use).
     var facts: [String] {
         var out: [String] = []
-        if let a = angle { out.append("Vinkel mellom flatene: \(mm(a, digits: 1))°") }
+        // Whole degrees: the room mesh and ARKit's planes are not sure of tenths.
+        if let a = angle { out.append("Vinkel mellom flatene: \(mm(a, digits: 0))°") }
         if let d = distanceMM { out.append("Avstand mellom punktene: \(mm(d, digits: 0)) mm") }
         if let p = picks.first {
             let up = abs(p.normal.y)
@@ -90,8 +138,10 @@ final class PlaceModel: ObservableObject {
 
     /// The room round the first pick (25 cm), Z up in mm with the pick at 0, as a locked surrounding.
     func send() {
+        // Twice in a row (a double tap) would put the room into CadSHAPE twice.
+        guard !sending else { return }
         guard let api else { error = "Koble til CadSHAPE først."; return }
-        guard let frame = arView?.session.currentFrame else { return }
+        guard let frame = arView?.session.currentFrame else { error = "Kameraet er ikke klart ennå. Prøv igjen om et øyeblikk."; return }
         let anchors = frame.anchors.compactMap { $0 as? ARMeshAnchor }
         guard !anchors.isEmpty else { error = "LiDAR-nettet er ikke klart ennå. Gå sakte rundt stedet et øyeblikk."; return }
         let centre: SIMD3<Float> = picks.isEmpty ? (frame.camera.transform * SIMD4<Float>(0, 0, -0.5, 1)).xyz : picks.map(\.point).reduce(.zero, +) / Float(picks.count)
@@ -114,7 +164,7 @@ final class PlaceModel: ObservableObject {
                 }
                 var notes = facts
                 if !want.isEmpty { notes.append("Skal lages her: \(want)") }
-                notes.append("Origo er det første punktet du valgte. Nettet er grovt (± noen mm) – bruk det til plassering, ikke passform.")
+                notes.append("Origo er det første punktet du valgte. Nettet er grovt (± 1–2 cm) – bruk det til plassering, ikke passform.")
                 let body: [String: Any] = ["type": "mesh", "role": "omgivelse", "name": want.isEmpty ? "Stedet" : "Stedet for \(want)", "stl": stl, "size": [s.x, s.y, s.z].map { ($0 * 10).rounded() / 10 }, "notes": notes]
                 api.postJSON("api/live/scan", body: body, timeout: 180) { [weak self] r in
                     guard let self else { return }

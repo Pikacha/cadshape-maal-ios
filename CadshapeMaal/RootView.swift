@@ -517,9 +517,15 @@ final class PrintWatch: ObservableObject {
         timer = nil
     }
 
+    /// A check is on its way (without contact one takes up to 8 s; they must not pile up).
+    private var refreshing = false
+
     func refresh() {
-        guard let api = model?.api, model?.pcOpen != false else { return }
+        // Only ask when CadSHAPE is known to be open; one at a time.
+        guard let api = model?.api, model?.pcOpen == true, !refreshing else { return }
+        refreshing = true
         api.getJSON("api/live/approval", query: ["brief": "1"]) { [weak self] r in
+            self?.refreshing = false
             guard let self, case .success(let j) = r else { return }
             guard let raw = j["card"] as? [String: Any], let brief = ApprovalCard(raw, thumb: self.card?.thumb) else {
                 // Answered elsewhere: show how it ended, then let it go.
@@ -637,6 +643,50 @@ final class PrintWatch: ObservableObject {
 struct ApprovalSheet: View {
     @ObservedObject var watch: PrintWatch
     @Environment(\.dismiss) private var dismiss
+    /// A fresh picture from the printer's camera: see the plate (and strings on it) before saying yes.
+    @State private var plate: UIImage?
+    @State private var plateNote: String?
+    @State private var loadingPlate = false
+
+    private func loadPlate() {
+        guard let api = watch.model?.api, !loadingPlate else { return }
+        loadingPlate = true
+        api.getData("api/live/printer/camera", timeout: 12) { r in
+            loadingPlate = false
+            switch r {
+            case .success(let data):
+                plate = UIImage(data: data)
+                plateNote = plate == nil ? "Ingen kamerabilde – se på platen selv." : "Tatt \(Date().formatted(date: .omitted, time: .shortened))"
+            case .failure:
+                // An old picture could mislead: drop it.
+                plate = nil
+                plateNote = "Ingen kamerabilde – se på platen selv."
+            }
+        }
+    }
+
+    @ViewBuilder private var plateCheck: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            ZStack {
+                RoundedRectangle(cornerRadius: 14, style: .continuous).fill(panel)
+                if let plate {
+                    Image(uiImage: plate).resizable().scaledToFit().clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+                } else if loadingPlate {
+                    ProgressView()
+                } else {
+                    Image(systemName: "camera").font(.title2).foregroundStyle(muted)
+                }
+            }
+            .aspectRatio(4 / 3, contentMode: .fit)
+            HStack {
+                Text(plateNote ?? "Henter bilde av platen …").font(.caption).foregroundStyle(muted)
+                Spacer()
+                Button { loadPlate() } label: { Label("Nytt bilde", systemImage: "arrow.clockwise") }
+                    .buttonStyle(ChipStyle())
+                    .disabled(loadingPlate)
+            }
+        }
+    }
 
     var body: some View {
         NavigationStack {
@@ -672,12 +722,14 @@ struct ApprovalSheet: View {
                             }
                         }
                         if card.state == "venter" {
-                            if let e = card.error ?? watch.answerError { Text("Ble ikke startet: \(e)").font(.subheadline).foregroundStyle(.red) }
-                            Text("Er platen tom og ren?").font(.subheadline).foregroundStyle(muted)
+                            if let e = card.error ?? watch.answerError { Text("Ble ikke startet: \(e)").font(.subheadline).foregroundStyle(bad) }
+                            plateCheck
+                                .onAppear { if plate == nil { loadPlate() } }
+                            Text("Er platen tom og ren, og dysen fri for tråd og klumper?").font(.subheadline.weight(.semibold))
                             HStack(spacing: 10) {
-                                Button("Nei") { watch.answer(false) }
+                                Button("Ikke print") { watch.answer(false) }
                                     .buttonStyle(SecondaryStyle())
-                                    .frame(maxWidth: 110)
+                                    .frame(maxWidth: 130)
                                 Button { watch.answer(true) } label: {
                                     Label(watch.answering ? "Sender …" : "Ja, print", systemImage: "play.fill")
                                 }

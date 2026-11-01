@@ -134,7 +134,18 @@ final class MeasurementStore: ObservableObject {
 
     func photoURL(_ m: SavedMeasurement) -> URL? { m.photo.map { dir.appendingPathComponent($0) } }
 
-    func image(_ m: SavedMeasurement) -> UIImage? { photoURL(m).flatMap { UIImage(contentsOfFile: $0.path) } }
+    /// Read from disk once: the list is redrawn often, and each photo is a full camera picture.
+    private let images = NSCache<NSString, UIImage>()
+
+    func image(_ m: SavedMeasurement) -> UIImage? {
+        let key = m.id.uuidString as NSString
+        if let hit = images.object(forKey: key) { return hit }
+        guard let url = photoURL(m), let img = UIImage(contentsOfFile: url.path) else { return nil }
+        // A small copy is enough for the 58 pt thumbnail.
+        let small = img.preparingThumbnail(of: CGSize(width: 180, height: 180)) ?? img
+        images.setObject(small, forKey: key)
+        return small
+    }
 
     /// The picture as base64 JPEG for CadSHAPE (nil when there is none).
     func photoData(_ m: SavedMeasurement) -> String? {

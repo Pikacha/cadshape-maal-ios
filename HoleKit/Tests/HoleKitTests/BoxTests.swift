@@ -108,10 +108,14 @@ final class BoxTests: XCTestCase {
     func testObjectTheRightWayRound() throws {
         let pts = objectCloud(a: 80, b: 40, h: 12, noise: 1, tab: true)
         let fit = try XCTUnwrap(fitObject(pts, aim: V3(0, 0.812, 0), right: V3(1, 0, 0)))
-        let far = try XCTUnwrap(fit.outline.max { $0.y < $1.y })
-        XCTAssertGreaterThan(far.y, 10)
+        // The outline lies in its smallest rectangle's frame (turned for this shape): back in the
+        // world, the tab must still be away from the camera (world −z) and to its right (+x).
+        let world = fit.outline.map { fit.centre + fit.xAxis * ($0.x / 1000) + fit.yAxis * ($0.y / 1000) }
+        let far = try XCTUnwrap(world.min { $0.z < $1.z })
+        XCTAssertLessThan(far.z, -0.025)
         XCTAssertGreaterThan(far.x, 0)
-        XCTAssertGreaterThan(fit.length, 50)
+        XCTAssertGreaterThan(fit.length, 46)
+        XCTAssertEqual(vdot(fit.yAxis, vcross(fit.up, fit.xAxis)), 1, accuracy: 1e-9)
     }
 
     func testNothingUnderTheCrossHair() {

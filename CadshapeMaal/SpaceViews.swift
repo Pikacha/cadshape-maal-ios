@@ -19,9 +19,11 @@ struct ModePicker: View {
                             Label(m.short, systemImage: m.symbol)
                                 .font(.footnote.weight(.semibold))
                                 .padding(.horizontal, 11)
-                                .padding(.vertical, 7)
+                                .padding(.vertical, 8)
                                 .background(model.mode == m ? accent : Color.white.opacity(0.12), in: Capsule())
                                 .foregroundStyle(model.mode == m ? Color.black : Color.white)
+                                .frame(minHeight: 44)
+                                .contentShape(Rectangle())
                         }
                         .buttonStyle(.plain)
                         .id(m)
@@ -73,7 +75,12 @@ struct SpaceLiveContent: View {
                 Label("Flate 1 er valgt", systemImage: "1.circle.fill").font(.footnote).opacity(0.8)
             }
             SteadyBar(value: space.steadiness)
-            Text(space.hint).font(.subheadline.weight(.medium)).foregroundStyle(space.steadiness > 0.7 ? good : accent)
+            Text(space.hint).font(.subheadline.weight(.semibold)).foregroundStyle(space.steadiness > 0.7 ? good : warn)
+                .lineLimit(2)
+                .frame(maxWidth: .infinity, minHeight: 40, alignment: .topLeading)
+            if let advice = space.advice {
+                Label(advice, systemImage: "info.circle").font(.footnote).foregroundStyle(warn).lineLimit(2)
+            }
             HStack(spacing: 10) {
                 if model.mode != .object {
                     Button {
@@ -636,7 +643,7 @@ struct SpaceStatus: View {
             }
         }
         if let error = space.error {
-            Label(error, systemImage: "exclamationmark.triangle.fill").font(.footnote).foregroundStyle(accent)
+            Label(error, systemImage: "exclamationmark.triangle.fill").font(.footnote).foregroundStyle(bad)
         }
     }
 }
@@ -647,20 +654,50 @@ struct SpaceButtons: View {
     let again: String
 
     var body: some View {
-        HStack(spacing: 10) {
-            Button {
-                space.measureAgain()
-            } label: {
-                Label(again, systemImage: "arrow.counterclockwise")
+        CommitButtons(connected: model.connected, done: space.done != nil, working: space.working,
+                      again: again, measureAgain: space.measureAgain, commit: space.commit,
+                      connect: { model.showSettings = true })
+    }
+}
+
+/// «Mål på nytt / Lag i CadSHAPE» – and what they become when it was sent (Mål neste) or when
+/// CadSHAPE is not open (saved on the phone, not a dead grey button).
+struct CommitButtons: View {
+    let connected: Bool
+    let done: Bool
+    let working: Bool
+    let again: String
+    let measureAgain: () -> Void
+    let commit: () -> Void
+    let connect: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            if !connected {
+                Label("Lagret på telefonen – sendes når CadSHAPE er åpent", systemImage: "tray.fill")
+                    .font(.footnote.weight(.semibold))
+                    .foregroundStyle(good)
             }
-            .buttonStyle(SecondaryStyle())
-            Button {
-                space.commit()
-            } label: {
-                Label(model.connected ? "Lag i CadSHAPE" : "Lagret", systemImage: model.connected ? "cube.fill" : "tray.fill")
+            HStack(spacing: 10) {
+                if done || !connected {
+                    if connected {
+                        Button(action: commit) { Label("Lag igjen", systemImage: "cube") }
+                            .buttonStyle(SecondaryStyle())
+                            .disabled(working)
+                    } else {
+                        Button(action: connect) { Label("Koble til", systemImage: "link") }
+                            .buttonStyle(SecondaryStyle())
+                    }
+                    Button(action: measureAgain) { Label("Mål neste", systemImage: "arrow.counterclockwise") }
+                        .buttonStyle(PrimaryStyle())
+                } else {
+                    Button(action: measureAgain) { Label(again, systemImage: "arrow.counterclockwise") }
+                        .buttonStyle(SecondaryStyle())
+                    Button(action: commit) { Label("Lag i CadSHAPE", systemImage: "cube.fill") }
+                        .buttonStyle(PrimaryStyle(enabled: !working))
+                        .disabled(working)
+                }
             }
-            .buttonStyle(PrimaryStyle(enabled: model.connected && !space.working))
-            .disabled(!model.connected || space.working)
         }
     }
 }

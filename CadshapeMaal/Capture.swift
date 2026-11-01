@@ -21,7 +21,7 @@ final class CaptureModel: ObservableObject {
         case failed(String)
     }
 
-    @Published var step: Step = .starting
+    @Published var step: Step = .starting { didSet { if step != oldValue { applog("3D-skann", "\(step)") } } }
     @Published var session: ObjectCaptureSession?
     @Published var shots = 0
     @Published var passDone = false
@@ -34,8 +34,8 @@ final class CaptureModel: ObservableObject {
     @Published var makeHolder = true
     @Published var sent: String?
     @Published var notes: [String] = []
-    @Published var error: String?
-    @Published var trackingHint: String?
+    @Published var error: String? { didSet { if let e = error { applog("3D-skann feil", e) } } }
+    @Published var trackingHint: String? { didSet { if let h = trackingHint, h != oldValue { applog("3D-skann", h) } } }
     @Published var stalled = false
     /// How many pictures the phone can use at most (Object Capture's own limit).
     @Published var maxShots = 0
@@ -506,7 +506,7 @@ struct CaptureScreen: View {
                 HStack { ProgressView(); Text("Starter kameraet …") }
             case .ready:
                 Text("Legg tingen på et bord med plass rundt").font(.headline)
-                Text("Matt underlag og jevnt lys gir best modell. Sikt på tingen.").font(.subheadline).foregroundStyle(.secondary)
+                Text("Matt underlag og jevnt lys gir best modell. Sikt på tingen. Skannet gir formen med noen millimeters nøyaktighet.").font(.subheadline).foregroundStyle(.secondary)
                 Button("Finn tingen") { cap.detect() }.buttonStyle(PrimaryStyle())
             case .detecting:
                 Text("Juster boksen rundt tingen").font(.headline)
@@ -643,7 +643,10 @@ struct CaptureScreen: View {
                 .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
         }
         Text(cap.sizeText).font(.title3.bold()).monospacedDigit()
-        Text("Skannet viser formen (± noen mm). Mål hull som må passe nøyaktig med «Hull».").font(.footnote).foregroundStyle(.secondary)
+        // On the phone Apple builds models at reduced detail: right for holders and pockets, not for tight fits.
+        Label("Formen er nøyaktig til noen millimeter – bra for holdere og lommer. Hull og kanter som skal sitte stramt: mål dem med «Hull».",
+              systemImage: "ruler")
+            .font(.footnote).foregroundStyle(warn)
         if let sent = cap.sent {
             Label(sent, systemImage: "checkmark.circle.fill").foregroundStyle(good).font(.headline)
             ForEach(cap.notes, id: \.self) { n in

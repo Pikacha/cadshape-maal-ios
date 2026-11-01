@@ -239,7 +239,9 @@ final class SpaceModel: ObservableObject {
     /// The box's floor, the object's footprint, the pipe's outline or the surface, on screen.
     @Published var polygonOnScreen: [CGPoint] = []
     @Published var steadiness = 0.0
-    @Published var hint = ""
+    /// Why this measurement may be poor right now (dark surface, thin thing, little of a pipe seen).
+    @Published var advice: String? { didSet { if let a = advice, a != oldValue { applog("LiDAR", a) } } }
+    @Published var hint = "" { didSet { if hint != oldValue { applog("LiDAR", hint) } } }
 
     // Locked (or typed in)
     @Published var locked = false
@@ -264,7 +266,7 @@ final class SpaceModel: ObservableObject {
     @Published var working = false
     @Published var done: String?
     @Published var notes: [String] = []
-    @Published var error: String?
+    @Published var error: String? { didSet { if let e = error { applog("LiDAR feil", e) } } }
 
     /// Bumped to tell the camera to start the point cloud afresh.
     private(set) var generation = 0
@@ -298,6 +300,7 @@ final class SpaceModel: ObservableObject {
         diameters = []
         surfaces = []
         misses = 0
+        advice = nil
         steadySince = nil
         locked = false
         manual = false
@@ -395,7 +398,8 @@ final class SpaceModel: ObservableObject {
         if diameters.count > 8 { diameters.removeFirst(diameters.count - 8) }
         steadiness = agreement([diameters], absMM: 0.5, relative: 0.01)
         hint = fit.residual > 2 ? "Ujevn flate – er det et rør? Gå litt nærmere." : steadyHint
-        checkAuto(ready: fit.residual <= 2)
+        // A short arc (seen only from the front) can be any diameter: not locked by itself.
+        checkAuto(ready: fit.residual <= 2 && (fit.coverage == 0 || fit.coverage >= 70))
     }
 
     func update(surface hit: SurfaceHit?, screen: [CGPoint]) {
@@ -409,7 +413,17 @@ final class SpaceModel: ObservableObject {
         misses = 0
         surfaces.append(hit)
         if surfaces.count > 6 { surfaces.removeFirst(surfaces.count - 6) }
-        steadiness = min(1, Double(surfaces.count) / 4)
+        // Steady = enough hits whose planes agree (normals within ~1°, positions within ~1 mm).
+        var worstAngle = 0.0, worstOffset = 0.0
+        if let ref = surfaces.first {
+            for s in surfaces {
+                let d = abs(vdotApp(s.plane.normal, ref.plane.normal))
+                worstAngle = max(worstAngle, acos(min(1, d)) * 180 / .pi)
+                worstOffset = max(worstOffset, abs(vdotApp(ref.plane.normal, s.point - ref.point)) * 1000)
+            }
+        }
+        let agree = max(0, 1 - max(worstAngle / 2, worstOffset / 3))
+        steadiness = min(1, Double(surfaces.count) / 4) * agree
         hint = startHint
     }
 
@@ -510,7 +524,9 @@ final class SpaceModel: ObservableObject {
             let mw = median(objects.map(\.width)), ml = median(objects.map(\.length))
             guard let best = objects.min(by: { abs($0.width - mw) + abs($0.length - ml) < abs($1.width - mw) + abs($1.length - ml) }) else { return }
             objectOut = ObjectOut(outline: best.outline.map { [$0.x, $0.y] }, width: best.width, length: best.length, height: median(objects.map(\.height)))
-            spread = best.sharpened ? 0.7 : 2
+            // What the frames actually varied by, never less than the method can do.
+            let madW = median(objects.map { abs($0.width - mw) }), madL = median(objects.map { abs($0.length - ml) })
+            spread = max(best.sharpened ? 0.7 : 2, 1.5 * max(madW, madL))
         case .pipe:
             guard !diameters.isEmpty else { return }
             let d = (median(diameters) * 10).rounded() / 10
@@ -537,8 +553,27 @@ final class SpaceModel: ObservableObject {
     }
 
     /// Gap mode: the surface in the cross-hair is the first (then the second, which locks).
+    /// The last surface hits together: normals turned the same way and averaged, points averaged.
+    /// One frame's plane wobbles a few degrees; the average of up to six is much steadier.
+    private func averagedSurface() -> SurfaceHit? {
+        guard let first = surfaces.first else { return nil }
+        var n = V3(0, 0, 0), p = V3(0, 0, 0)
+        for s in surfaces {
+            let sign: Double = vdotApp(s.plane.normal, first.plane.normal) < 0 ? -1 : 1
+            n += s.plane.normal * sign
+            p += s.point
+        }
+        let len = (n.x * n.x + n.y * n.y + n.z * n.z).squareRoot()
+        guard len > 1e-9 else { return surfaces.last }
+        let normal = n / len
+        let point = p / Double(surfaces.count)
+        return SurfaceHit(plane: Plane(normal: normal, offset: vdotApp(normal, point)), point: point)
+    }
+
+    private func vdotApp(_ a: V3, _ b: V3) -> Double { a.x * b.x + a.y * b.y + a.z * b.z }
+
     func takeSurface() {
-        guard let hit = surfaces.last else { return }
+        guard let hit = averagedSurface() else { return }
         tap.impactOccurred()
         guard let first = firstSurface else {
             firstSurface = hit
@@ -564,7 +599,8 @@ final class SpaceModel: ObservableObject {
         manual = false
         done = nil
         error = nil
-        notes = []
+        // LiDAR cannot tell a 2 mm gap from 0: say so instead of a confident number.
+        notes = g.gapMM < 3 ? ["Under 3 mm måler LiDAR dårlig – mål spalten med søkerblad eller skyvelære og skriv den inn."] : []
         let picture = owner?.snapshot?()
         owner?.pauseCamera?()
         save(picture: picture)
@@ -578,7 +614,14 @@ final class SpaceModel: ObservableObject {
         case .box:
             if let b = box { boxOut = BoxOut(width: b.width, length: b.length, height: b.height ?? 50, wall: b.wall) }
         case .pipe:
-            if let p = pipe { pipeOut = PipeOut(diameter: p.diameter, second: nil) }
+            if measuringSecond {
+                // Typing in the second pipe: keep the first one, the live value is only a start.
+                pipeOut.second = pipe?.diameter ?? pipeOut.second ?? pipeOut.diameter
+                pipeMake = .adapter
+                measuringSecond = false
+            } else if let p = pipe {
+                pipeOut = PipeOut(diameter: p.diameter, second: nil)
+            }
         case .gap:
             break
         default:

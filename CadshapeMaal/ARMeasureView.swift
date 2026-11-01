@@ -162,6 +162,7 @@ final class Measurer: NSObject, ARSessionDelegate {
                     case .pipe: space.update(pipe: result.pipe, screen: shown)
                     default: space.update(surface: result.surface, screen: shown)
                     }
+                    if space.advice != result.advice { space.advice = result.advice }
                 }
             }
             return
@@ -254,6 +255,43 @@ extension Measurer {
         var surface: SurfaceHit?
         /// What to draw over the picture (world points, closed).
         var world: [V3] = []
+        /// Said under the live sizes: why the measurement may be poor (dark surface, thin thing).
+        var advice: String?
+    }
+
+    /// A thin thing's outline from the camera picture: Vision's foreground mask, the part under the
+    /// cross-hair, laid onto the table the LiDAR found.
+    fileprivate func thinObject(_ frame: ARFrame, seed: CGPoint, K: Intrinsics, pose: CameraPose, aim: V3, right: V3) -> ObjectFit? {
+        let request = VNGenerateForegroundInstanceMaskRequest()
+        let handler = VNImageRequestHandler(cvPixelBuffer: frame.capturedImage, orientation: .up)
+        guard (try? handler.perform([request])) != nil, let obs = request.results?.first else { return nil }
+        let labels = obs.instanceMask
+        CVPixelBufferLockBaseAddress(labels, .readOnly)
+        defer { CVPixelBufferUnlockBaseAddress(labels, .readOnly) }
+        guard let base = CVPixelBufferGetBaseAddress(labels) else { return nil }
+        let w = CVPixelBufferGetWidth(labels), h = CVPixelBufferGetHeight(labels)
+        let row = CVPixelBufferGetBytesPerRow(labels)
+        let px = base.assumingMemoryBound(to: UInt8.self)
+        guard w > 0, h > 0 else { return nil }
+        let ax = min(w - 1, max(0, Int(Double(seed.x) * Double(w))))
+        let ay = min(h - 1, max(0, Int(Double(seed.y) * Double(h))))
+        // The instance under the cross-hair, or the nearest one within a few percent of the picture.
+        var label: UInt8 = 0
+        var best = Int.max
+        let reach = max(4, w / 25)
+        for y in max(0, ay - reach)...min(h - 1, ay + reach) {
+            for x in max(0, ax - reach)...min(w - 1, ax + reach) {
+                let v = px[y * row + x]
+                let d = (x - ax) * (x - ax) + (y - ay) * (y - ay)
+                if v != 0 && d < best { best = d; label = v }
+            }
+        }
+        guard label != 0 else { return nil }
+        var mask = [UInt8](repeating: 0, count: w * h)
+        for y in 0..<h { for x in 0..<w where px[y * row + x] == label { mask[y * w + x] = 1 } }
+        let imageWidth = Double(frame.camera.imageResolution.width)
+        return objectFromMask(mask, width: w, height: h, aim: P2(Double(ax), Double(ay)), maskToImage: imageWidth / Double(w),
+                              intrinsics: K, pose: pose, points: cloud.points, aimWorld: aim, right: right)
     }
 
     /// The point cloud of the last frames and the box, object, pipe or surface in it. Nil without LiDAR.
@@ -269,32 +307,48 @@ extension Measurer {
         if cloud.generation != generation { cloud.reset(generation) }
         // A big jump since the last frame (moved > 10 cm or turned > 15°): start the cloud again.
         cloud.follow(pose)
-        cloud.add(cloudPoints(dm, intrinsics: K, imageWidth: iw, imageHeight: ih, pose: pose))
+        // Dark, black or glossy surfaces: the sensor is rarely sure of them. Then take the points it is
+        // half sure of too (noisier, but something) and say why the numbers may be off.
+        let sure = confidentShare(dm, aroundPixel: Double(seed.x) * iw, v: Double(seed.y) * ih, imageWidth: iw, imageHeight: ih)
+        let dark = sure < 0.3
+        cloud.add(cloudPoints(dm, intrinsics: K, imageWidth: iw, imageHeight: ih, pose: pose, minConfidence: dark ? 1 : 2))
+        let darkAdvice = dark ? "Mørk eller blank flate – LiDAR ser lite. Legg et lyst ark under, eller skriv inn målene." : nil
         // Held upright, the screen's right is the camera's y axis (its picture lies on its side).
         let right = pose.y
         guard let aim = pointAt(dm, intrinsics: K, imageWidth: iw, imageHeight: ih, pose: pose, u: Double(seed.x) * iw, v: Double(seed.y) * ih) else {
-            return SpaceResult()
+            return SpaceResult(advice: darkAdvice)
         }
         switch mode {
         case .box:
             let fit = fitBox(cloud.points, aim: aim, right: right)
-            return SpaceResult(box: fit, world: fit?.corners ?? [])
+            return SpaceResult(box: fit, world: fit?.corners ?? [], advice: darkAdvice)
         case .object:
-            guard var fit = fitObject(cloud.points, aim: aim, right: right) else { return SpaceResult() }
-            // The picture has the edge sharper than the LiDAR.
-            if let gray = FrameReader.gray(frame.capturedImage)?.blurred(),
-               let sharp = refineOutline(fit, gray: gray, scale: iw / Double(gray.width), intrinsics: K, pose: pose) {
-                fit = sharp
+            var fit = fitObject(cloud.points, aim: aim, right: right)
+            var advice = darkAdvice
+            // Thin, flat things (a spanner, a ruler) hardly stand out from the table for the LiDAR:
+            // take their outline from the camera picture instead, laid onto the table.
+            if fit == nil || (fit?.height ?? 0) < 8, let thin = thinObject(frame, seed: seed, K: K, pose: pose, aim: aim, right: right) {
+                fit = thin
+                advice = "Tynn ting – omrisset er fra kamerabildet. Hold telefonen rett over, med jevnt lys."
+            } else if var lidar = fit,
+                      let gray = FrameReader.gray(frame.capturedImage)?.blurred(),
+                      let sharp = refineOutline(lidar, gray: gray, scale: iw / Double(gray.width), intrinsics: K, pose: pose) {
+                // The picture has the edge sharper than the LiDAR.
+                lidar = sharp
+                fit = lidar
             }
-            return SpaceResult(object: fit, world: fit.outlineWorld)
+            guard let fit else { return SpaceResult(advice: advice) }
+            return SpaceResult(object: fit, world: fit.outlineWorld, advice: advice)
         case .pipe:
-            guard let fit = fitCylinder(cloud.points, aim: aim, reach: 0.06) else { return SpaceResult() }
+            guard let fit = fitCylinder(cloud.points, aim: aim, reach: 0.06) else { return SpaceResult(advice: darkAdvice) }
             // The pipe's outline as seen: 4 cm along the axis, its radius to each side.
             let across = vnormalized(vcross(fit.axis, pose.z))
             let r = fit.diameter / 2000
             let a = fit.axis * 0.04
             let c = fit.centre
-            return SpaceResult(pipe: fit, world: [c - a - across * r, c + a - across * r, c + a + across * r, c - a + across * r])
+            // Seen only from the front, the diameter is a guess from a short arc.
+            let pipeAdvice = fit.coverage > 0 && fit.coverage < 70 ? "Ser lite av røret – gå litt til siden eller nærmere." : darkAdvice
+            return SpaceResult(pipe: fit, world: [c - a - across * r, c + a - across * r, c + a + across * r, c - a + across * r], advice: pipeAdvice)
         default:
             guard let s = surfaceNear(cloud.points, at: aim) else { return SpaceResult() }
             // A 2 cm square on the surface.

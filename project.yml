@@ -11,7 +11,7 @@ packages:
 settings:
   base:
     SWIFT_VERSION: "5.0"
-    MARKETING_VERSION: "2.5"
+    MARKETING_VERSION: "2.6"
     CURRENT_PROJECT_VERSION: "6"
     DEVELOPMENT_TEAM: ""
 targets:

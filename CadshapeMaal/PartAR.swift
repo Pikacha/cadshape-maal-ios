@@ -25,6 +25,9 @@ final class PartARModel: ObservableObject {
     @Published var placed = false
     @Published var clearance: Clearance?
     @Published var sent: String?
+    @Published var sending = false
+    /// Said under the part when it was thinned out to draw smoothly.
+    @Published var note: String?
 
     private let current: () -> CadshapeClient?
     /// Always the connection the app has now (it can switch while this screen is open).
@@ -33,12 +36,25 @@ final class PartARModel: ObservableObject {
     /// The part in RealityKit's local space (m, Y up), bottom at 0.
     private(set) var local: TriangleMesh?
     private var entity: ModelEntity?
+    /// The part's RealityKit mesh, made once per part (placing it again reuses it).
+    private var resource: MeshResource?
+    /// The drag/twist gestures on the part now – removed before new ones go on.
+    private var gestures: [EntityGestureRecognizer] = []
     private var anchor: AnchorEntity?
     private var marks: AnchorEntity?
     private var samples: [SIMD3<Float>] = []
     private let queue = DispatchQueue(label: "cadshape.maal.clearance", qos: .userInitiated)
     private var checking = false
     private var lastCheck: TimeInterval = 0
+    /// Whether each of the last three checks saw enough points go in (one noisy check is not a hit).
+    private var hitHistory: [Bool] = []
+    /// Bumped for every part asked for: an answer for an older one is dropped.
+    private var request = 0
+    /// Bumped every time the part is put down again: a check of the old place is dropped.
+    private var placement = 0
+    private var sentToken = 0
+    /// More triangles than this are thinned out for drawing (the clearance check uses the whole part).
+    static let maxDrawnTriangles = 150_000
 
     init(api: @escaping @autoclosure () -> CadshapeClient?) {
         current = api
@@ -57,6 +73,7 @@ final class PartARModel: ObservableObject {
             self.loading = false
             switch r {
             case .success(let j):
+                self.error = nil
                 let result = j["result"] as? [String: Any] ?? [:]
                 self.project = result["project"] as? String ?? ""
                 self.parts = (result["parts"] as? [[String: Any]] ?? []).compactMap { p in
@@ -75,49 +92,85 @@ final class PartARModel: ObservableObject {
     }
 
     func choose(_ id: String) {
-        guard let api else { return }
+        guard let api else { error = "Koble til CadSHAPE først."; return }
         chosen = id
         loading = true
         error = nil
+        request += 1
+        let asked = request
         api.getData("api/live/phone/part", query: ["id": id]) { [weak self] r in
-            guard let self else { return }
-            self.loading = false
+            // Answers can come in another order than asked: only the part asked for last counts.
+            guard let self, self.request == asked, self.chosen == id else { return }
             switch r {
             case .success(let data):
-                guard let mesh = parseBinarySTL(data), mesh.triangleCount > 0 else { self.error = "Kunne ikke lese delen."; return }
-                if mesh.triangleCount > 400_000 { self.error = "Delen er for detaljert til AR (\(mesh.triangleCount) trekanter)."; return }
-                self.setMesh(mesh)
+                // Reading and preparing a big part takes a while: not on the main thread (the picture would freeze).
+                DispatchQueue.global(qos: .userInitiated).async {
+                    let prepared = PartARModel.prepare(data)
+                    DispatchQueue.main.async { [weak self] in
+                        guard let self, self.request == asked, self.chosen == id else { return }
+                        self.loading = false
+                        switch prepared {
+                        case .success(let p): self.show(p)
+                        case .failure(let e): self.error = e.message
+                        }
+                    }
+                }
             case .failure(let e):
+                self.loading = false
                 self.error = e.message
             }
         }
     }
 
-    /// CadSHAPE (mm, Z up) → local (m, Y up), centred, bottom on 0.
-    private func setMesh(_ cad: TriangleMesh) {
-        guard let b = cad.bounds else { return }
-        let shift = V3((b.min.x + b.max.x) / 2, (b.min.y + b.max.y) / 2, b.min.z)
-        local = cad.mapped { cadToWorld($0 - shift) }
-        samples = sampleVertices(local!, count: 1500).map { SIMD3<Float>(Float($0.x), Float($0.y), Float($0.z)) }
+    /// Off the main thread: CadSHAPE (mm, Z up) → local (m, Y up), centred, bottom on 0, and the
+    /// triangles to draw – every n-th one when there are very many.
+    static func prepare(_ data: Data) -> Result<PreparedPart, PartFailure> {
+        guard let cad = parseBinarySTL(data), cad.triangleCount > 0, let box = cad.bounds else {
+            return .failure(PartFailure(message: "Kunne ikke lese delen."))
+        }
+        let total = cad.triangleCount
+        if total > 1_000_000 { return .failure(PartFailure(message: "Delen er for detaljert til AR (\(total) trekanter).")) }
+        let shift = V3((box.min.x + box.max.x) / 2, (box.min.y + box.max.y) / 2, box.min.z)
+        let local = cad.mapped { cadToWorld($0 - shift) }
+        func f(_ v: V3) -> SIMD3<Float> { SIMD3<Float>(Float(v.x), Float(v.y), Float(v.z)) }
+        let samples = sampleVertices(local, count: 1500).map(f)
+        let step = max(1, (total + maxDrawnTriangles - 1) / maxDrawnTriangles)
+        let vs = local.vertices
+        var positions: [SIMD3<Float>] = []
+        var normals: [SIMD3<Float>] = []
+        positions.reserveCapacity(3 * (total / step + 1))
+        normals.reserveCapacity(3 * (total / step + 1))
+        var t = 0
+        while t < total {
+            let a = Int(local.faces[3 * t]), b = Int(local.faces[3 * t + 1]), c = Int(local.faces[3 * t + 2])
+            t += step
+            guard a < vs.count, b < vs.count, c < vs.count else { continue }
+            let pa = f(vs[a]), pb = f(vs[b]), pc = f(vs[c])
+            let n = simd_normalize(simd_cross(pb - pa, pc - pa))
+            let nn = (n.x.isFinite && n.y.isFinite && n.z.isFinite) ? n : SIMD3<Float>(0, 1, 0)
+            positions.append(pa); positions.append(pb); positions.append(pc)
+            normals.append(nn); normals.append(nn); normals.append(nn)
+        }
+        if positions.isEmpty { return .failure(PartFailure(message: "Kunne ikke lese delen.")) }
+        return .success(PreparedPart(local: local, samples: samples, positions: positions, normals: normals, total: total, drawn: positions.count / 3))
+    }
+
+    /// On the main thread: the prepared arrays become RealityKit's mesh (only this has to be here).
+    private func show(_ p: PreparedPart) {
+        var desc = MeshDescriptor(name: "del")
+        desc.positions = MeshBuffers.Positions(p.positions)
+        desc.normals = MeshBuffers.Normals(p.normals)
+        desc.primitives = .triangles(Array(0..<UInt32(p.positions.count)))
+        guard let made = try? MeshResource.generate(from: [desc]) else { error = "Kunne ikke tegne delen."; return }
+        resource = made
+        local = p.local
+        samples = p.samples
+        note = p.drawn < p.total ? "Forenklet for AR: viser \(p.drawn) av \(p.total) trekanter. Klaringen sjekkes mot hele delen." : nil
         if let anchor { rebuild(on: anchor) }
     }
 
     private func makeEntity() -> ModelEntity? {
-        guard let local else { return nil }
-        let positions = local.vertices.map { SIMD3<Float>(Float($0.x), Float($0.y), Float($0.z)) }
-        var normals = [SIMD3<Float>](repeating: SIMD3<Float>(0, 1, 0), count: positions.count)
-        var i = 0
-        while i + 2 < local.faces.count {
-            let a = Int(local.faces[i]), b = Int(local.faces[i + 1]), c = Int(local.faces[i + 2])
-            let n = simd_normalize(simd_cross(positions[b] - positions[a], positions[c] - positions[a]))
-            if n.x.isFinite { normals[a] = n; normals[b] = n; normals[c] = n }
-            i += 3
-        }
-        var desc = MeshDescriptor(name: "del")
-        desc.positions = MeshBuffers.Positions(positions)
-        desc.normals = MeshBuffers.Normals(normals)
-        desc.primitives = .triangles(local.faces)
-        guard let resource = try? MeshResource.generate(from: [desc]) else { return nil }
+        guard let resource else { return nil }
         let material = SimpleMaterial(color: UIColor(red: 0.95, green: 0.66, blue: 0.23, alpha: 0.82), roughness: 0.55, isMetallic: false)
         let e = ModelEntity(mesh: resource, materials: [material])
         e.generateCollisionShapes(recursive: false)
@@ -126,12 +179,20 @@ final class PartARModel: ObservableObject {
 
     private func rebuild(on anchor: AnchorEntity) {
         entity?.removeFromParent()
+        entity = nil
         guard let e = makeEntity() else { error = "Kunne ikke tegne delen."; return }
         anchor.addChild(e)
         entity = e
-        if let arView { arView.installGestures([.translation, .rotation], for: e) }
+        if let arView {
+            // Each new part or place would otherwise stack another set of drag/twist gestures.
+            for g in gestures { arView.removeGestureRecognizer(g) }
+            gestures = arView.installGestures([.translation, .rotation], for: e)
+        }
         placed = true
+        placement += 1
+        hitHistory = []
         clearance = nil
+        showMarks([])
     }
 
     /// A tap on the picture: the part stands on that surface (wall, table, beam), bottom against it.
@@ -167,9 +228,10 @@ final class PartARModel: ObservableObject {
     /// About four times a second: the part's points against the LiDAR depth (off the main thread).
     func check(_ frame: ARFrame) {
         guard placed, let entity, !checking, frame.timestamp - lastCheck > 0.25,
-              let data = frame.sceneDepth ?? frame.smoothedSceneDepth else { return }
+              let data = frame.smoothedSceneDepth ?? frame.sceneDepth else { return }
         checking = true
         lastCheck = frame.timestamp
+        let at = placement
         let m = entity.transformMatrix(relativeTo: nil)
         let world = samples.map { p -> V3 in
             let w = m * SIMD4<Float>(p.x, p.y, p.z, 1)
@@ -180,14 +242,37 @@ final class PartARModel: ObservableObject {
         let iw = Double(frame.camera.imageResolution.width), ih = Double(frame.camera.imageResolution.height)
         guard let dm = FrameReader.depth(data) else { checking = false; return }
         queue.async { [weak self] in
-            let r = depthClearance(world, depth: dm, intrinsics: K, imageWidth: iw, imageHeight: ih, pose: pose)
+            let r = steadyClearance(world, depth: dm, intrinsics: K, imageWidth: iw, imageHeight: ih, pose: pose)
             DispatchQueue.main.async {
                 guard let self else { return }
                 self.checking = false
-                self.clearance = r.checked > 20 ? r : nil
-                self.showMarks(r.hits)
+                // Placed again or another part meanwhile: this answer is about the old one.
+                guard at == self.placement else { return }
+                self.take(r.clearance, hitCount: r.hitCount)
             }
         }
+    }
+
+    /// «Goes in» only when enough points go in (≥ 10, and ≥ 3 % of those checked) in two of the
+    /// last three checks – a few noisy LiDAR pixels for a quarter of a second are not a hit.
+    private func take(_ r: Clearance, hitCount: Int) {
+        guard r.checked > 20 else {
+            clearance = nil
+            showMarks([])
+            return
+        }
+        let enough = hitCount >= max(10, Int((Double(r.checked) * 0.03).rounded(.up)))
+        hitHistory.append(enough)
+        if hitHistory.count > 3 { hitHistory.removeFirst(hitHistory.count - 3) }
+        var c = r
+        if hitHistory.filter({ $0 }).count < 2 {
+            // Points just behind the surface without a steady hit: it rests against it.
+            if hitCount > 0, c.gapMM == nil { c.gapMM = 0 }
+            c.hitMM = 0
+            c.hits = []
+        }
+        clearance = c
+        showMarks(c.hits)
     }
 
     private func showMarks(_ hits: [V3]) {
@@ -205,7 +290,10 @@ final class PartARModel: ObservableObject {
     }
 
     var clearanceText: String {
-        guard placed else { return local == nil ? "Henter delen …" : "Trykk på flaten der delen skal sitte." }
+        guard placed else {
+            if local == nil { return api == nil ? "Ikke koblet til CadSHAPE." : "Henter delen …" }
+            return "Trykk på flaten der delen skal sitte."
+        }
         guard let c = clearance else { return "Hold telefonen 20–80 cm unna, så LiDAR ser bak delen." }
         if c.hitMM >= 1 { return "Går ca. \(mm(c.hitMM, digits: 0)) mm inn i det som er bak" }
         if let g = c.gapMM { return g < 1 ? "Ligger an – ingen luft å se" : "Ca. \(mm(g, digits: 0)) mm luft til det som er bak" }
@@ -216,12 +304,90 @@ final class PartARModel: ObservableObject {
 
     /// What the phone saw, as a note in CadSHAPE.
     func report() {
-        guard let api else { return }
+        guard let api else { error = "Koble til CadSHAPE først."; return }
+        guard !sending else { return }
         let text = "«\(chosenName)»: \(clearanceText.lowercased())."
+        sending = true
+        error = nil
         api.postJSON("api/live/scan", body: ["type": "ar", "text": text, "part": chosenName]) { [weak self] r in
-            if case .failure(let e) = r { self?.error = e.message } else { self?.sent = "Sendt til CadSHAPE" }
+            guard let self else { return }
+            self.sending = false
+            switch r {
+            case .success:
+                UINotificationFeedbackGenerator().notificationOccurred(.success)
+                self.sent = "Sendt til CadSHAPE"
+                self.sentToken += 1
+                let token = self.sentToken
+                // A moment later it can be sent again (after moving the part, say).
+                DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) { [weak self] in
+                    guard let self, self.sentToken == token else { return }
+                    self.sent = nil
+                }
+            case .failure(let e):
+                self.error = e.message
+            }
         }
     }
+}
+
+/// A part ready to draw, worked out off the main thread.
+struct PreparedPart {
+    /// The whole part in RealityKit's local space (m, Y up), bottom at 0.
+    var local: TriangleMesh
+    /// Corners for the clearance check (from the whole part, not only the drawn triangles).
+    var samples: [SIMD3<Float>]
+    /// Three corners per drawn triangle, with that triangle's normal.
+    var positions: [SIMD3<Float>]
+    var normals: [SIMD3<Float>]
+    var total: Int
+    var drawn: Int
+}
+
+struct PartFailure: Error {
+    var message: String
+}
+
+/// Like HoleKit's `depthClearance`, but steadier for this screen: only depth ARKit is sure of
+/// (confidence 2), a tolerance that grows with distance (LiDAR noise is about 1 % of the distance),
+/// and percentiles instead of the single deepest / closest point – one noisy pixel decides nothing.
+/// The hit depth is the 90th percentile of the points that go in, the air the 10th percentile of
+/// the points in front. `hitCount` is how many points went in (the marks are capped at `maxHits`).
+func steadyClearance(_ points: [V3], depth dm: DepthMap, intrinsics K: Intrinsics, imageWidth: Double, imageHeight: Double, pose: CameraPose,
+                     near: Double = 0.03, maxHits: Int = 24) -> (clearance: Clearance, hitCount: Int) {
+    let sx = imageWidth / Double(dm.width)
+    let sy = imageHeight / Double(dm.height)
+    var airs: [Double] = []
+    var hits: [(V3, Double)] = []
+    var checked = 0
+    for p in points {
+        let c = pose.camera(p)
+        if c.z < 0.08 { continue }
+        let u = (K.fx * c.x / c.z + K.cx) / sx
+        let v = (K.fy * c.y / c.z + K.cy) / sy
+        guard u.isFinite, v.isFinite, u >= 0, v >= 0, u < Double(dm.width), v < Double(dm.height) else { continue }
+        let k = Int(v) * dm.width + Int(u)
+        let z = dm.depth[k]
+        guard z.isFinite, z > 0.05, z < 10 else { continue }
+        if let conf = dm.confidence, conf[k] < 2 { continue }
+        checked += 1
+        let real = Double(z)
+        let behind = c.z - real
+        let tolerance = 0.004 + 0.01 * real
+        if behind > tolerance && behind < near + tolerance {
+            hits.append((p, behind))
+        } else if behind <= tolerance {
+            let air = max(0, -behind)
+            if air < 0.05 { airs.append(air) }
+        }
+    }
+    func percentile(_ values: [Double], _ q: Double) -> Double {
+        let s = values.sorted()
+        return s[min(s.count - 1, max(0, Int((Double(s.count - 1) * q).rounded())))]
+    }
+    let hitDepth = hits.isEmpty ? 0 : percentile(hits.map { $0.1 }, 0.9)
+    let gap: Double? = airs.isEmpty ? nil : percentile(airs, 0.1)
+    let marks = hits.sorted { $0.1 > $1.1 }.prefix(maxHits).map { $0.0 }
+    return (Clearance(gapMM: gap.map { $0 * 1000 }, hitMM: hitDepth * 1000, hits: Array(marks), checked: checked), hits.count)
 }
 
 struct PartARView: UIViewRepresentable {
@@ -237,7 +403,12 @@ struct PartARView: UIViewRepresentable {
             config.sceneReconstruction = .mesh
             view.environment.sceneUnderstanding.options.insert(.occlusion)
         }
-        if ARWorldTrackingConfiguration.supportsFrameSemantics(.sceneDepth) { config.frameSemantics.insert(.sceneDepth) }
+        // Smoothed depth (averaged over a few frames) for the clearance: steadier than the raw one.
+        if ARWorldTrackingConfiguration.supportsFrameSemantics(.smoothedSceneDepth) {
+            config.frameSemantics.insert(.smoothedSceneDepth)
+        } else if ARWorldTrackingConfiguration.supportsFrameSemantics(.sceneDepth) {
+            config.frameSemantics.insert(.sceneDepth)
+        }
         view.session.delegate = context.coordinator
         view.session.run(config)
         view.addGestureRecognizer(UITapGestureRecognizer(target: context.coordinator, action: #selector(Coordinator.tapped(_:))))
@@ -268,14 +439,26 @@ struct PartARView: UIViewRepresentable {
 
 struct PartARScreen: View {
     @ObservedObject var watch: PrintWatch
+    /// The app's connection: «Koble til» opens its settings from here. Not observed – it changes
+    /// many times a second while measuring, and this screen redraws often enough by itself.
+    let measure: MeasureModel
     @StateObject private var ar: PartARModel
     let close: () -> Void
     @State private var showCard = false
+    @State private var connecting = false
 
     init(model: MeasureModel, watch: PrintWatch, close: @escaping () -> Void) {
         self.watch = watch
+        self.measure = model
         self.close = close
         _ar = StateObject(wrappedValue: PartARModel(api: model.api))
+    }
+
+    /// Back from «Koble til»: now connected, so fetch the parts.
+    private func connected() {
+        guard ar.api != nil else { return }
+        ar.error = nil
+        if ar.parts.isEmpty { ar.loadParts() }
     }
 
     var body: some View {
@@ -315,6 +498,10 @@ struct PartARScreen: View {
         }
         .onDisappear { UIApplication.shared.isIdleTimerDisabled = false }
         .sheet(isPresented: $showCard) { ApprovalSheet(watch: watch) }
+        // Its own sheet: the home screen's «Koble til» sheet sits under this screen.
+        .background(EmptyView().sheet(isPresented: $connecting, onDismiss: connected) {
+            SettingsSheet(model: measure, allowQR: false) { connecting = false }
+        })
         .onChange(of: ar.chosen) { watch.lastPartLabel = ar.chosenName }
     }
 
@@ -351,6 +538,10 @@ struct PartARScreen: View {
             Label(ar.clearanceText, systemImage: ar.clearanceIsBad ? "exclamationmark.triangle.fill" : "ruler")
                 .font(.headline)
                 .foregroundStyle(ar.clearanceIsBad ? bad : Color.white)
+            if ar.api == nil {
+                Button { connecting = true } label: { Label("Koble til", systemImage: "link") }.buttonStyle(PrimaryStyle())
+            }
+            if let n = ar.note { Text(n).font(.footnote).opacity(0.75) }
             if ar.placed {
                 HStack(spacing: 8) {
                     Button { ar.turn(across: false) } label: { Label("Vri 90°", systemImage: "rotate.right") }.buttonStyle(SecondaryStyle())
@@ -358,7 +549,12 @@ struct PartARScreen: View {
                 }
                 Text("Dra for å flytte, vri med to fingre. Trykk et annet sted for å sette den der.").font(.footnote).opacity(0.75)
                 HStack(spacing: 8) {
-                    Button { ar.report() } label: { Label(ar.sent ?? "Send til CadSHAPE", systemImage: "paperplane") }.buttonStyle(SecondaryStyle())
+                    Button { ar.report() } label: {
+                        Label(ar.sending ? "Sender …" : (ar.sent ?? "Send til CadSHAPE"), systemImage: ar.sent == nil ? "paperplane" : "checkmark.circle.fill")
+                            .foregroundStyle(ar.sent == nil ? Color.white : good)
+                    }
+                    .buttonStyle(SecondaryStyle())
+                    .disabled(ar.sending || ar.sent != nil)
                     if watch.card?.state == "venter" {
                         Button { showCard = true } label: { Label("Godkjenn print", systemImage: "play.fill") }.buttonStyle(PrimaryStyle())
                     }

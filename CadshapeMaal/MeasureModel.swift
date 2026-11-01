@@ -14,17 +14,18 @@ enum MeasureMode: String, CaseIterable, Identifiable {
         case .single: return "Ett hull"
         case .pattern: return "Hullmønster"
         case .box: return "Inni boks"
-        case .object: return "Gjenstand"
+        case .object: return "Omriss av ting"
         case .pipe: return "Rør"
         case .gap: return "Spalte"
         }
     }
+    /// «Omriss», not «Ting»: the home screen's «Skann en ting» is the 3D scan, a different thing.
     var short: String {
         switch self {
         case .single: return "Hull"
         case .pattern: return "Mønster"
         case .box: return "Boks"
-        case .object: return "Ting"
+        case .object: return "Omriss"
         case .pipe: return "Rør"
         case .gap: return "Spalte"
         }
@@ -60,7 +61,7 @@ final class MeasureModel: ObservableObject {
     @Published var wantsPairing = false
     /// nil = not asked yet / no contact, true = CadSHAPE is open (on the PC or in a browser).
     @Published var pcOpen: Bool?
-    @Published var connectionError: String?
+    @Published var connectionError: String? { didSet { if let e = connectionError, e != oldValue { applog("Tilkobling", e) } } }
     @Published var showSettings = false
     /// Failed checks in a row against the PC on the Wi-Fi.
     private var lanFailures = 0
@@ -68,8 +69,8 @@ final class MeasureModel: ObservableObject {
 
     // The camera
     @Published var hasLidar = false
-    @Published var fatal: String?
-    @Published var hint = "Sikt krysset midt på hullet"
+    @Published var fatal: String? { didSet { if let f = fatal { applog("Kamera", f) } } }
+    @Published var hint = "Sikt krysset midt på hullet" { didSet { if hint != oldValue { applog("Hint", hint) } } }
 
     // Live measuring
     @Published var mode: MeasureMode = .single {
@@ -102,8 +103,8 @@ final class MeasureModel: ObservableObject {
     }
     @Published var params: [ParamKey: Double] = Dictionary(uniqueKeysWithValues: ParamKey.allCases.map { ($0, $0.defaultValue) })
     @Published var working = false
-    @Published var done: String?
-    @Published var error: String?
+    @Published var done: String? { didSet { if let d = done { applog("Hull", d) } } }
+    @Published var error: String? { didSet { if let e = error { applog("Hull feil", e) } } }
 
     /// Two clear edges were seen round the locked hole; the other one (nil = one clear edge).
     @Published var lockedAlternative: EdgeAlternative?
@@ -151,6 +152,8 @@ final class MeasureModel: ObservableObject {
     private var misses = 0
     /// Which lock an answer from CadSHAPE belongs to.
     private var lockToken = UUID()
+    /// A status check is on its way.
+    private var checking = false
     private var quality = measurementQuality([], trackingNormal: false)
     private var lockedDiagnostics: MeasurementDiagnostics?
     private var lastWorld: (centre: SIMD3<Float>, normal: SIMD3<Float>)?
@@ -238,6 +241,7 @@ final class MeasureModel: ObservableObject {
         // Answers from the old connection never come: nothing may stay «busy» waiting for them.
         sending = false
         working = false
+        checking = false
         space.connectionChanged()
         let c = CadshapeClient(pairing: p)
         c.onPin = { [weak self] pin in
@@ -268,9 +272,13 @@ final class MeasureModel: ObservableObject {
     }
 
     func checkPc() {
-        guard let client else { return }
+        // Without contact a check takes up to 8 s: never start the next one before it answered.
+        guard let client, !checking else { return }
+        checking = true
         client.status { [weak self] r in
-            guard let self else { return }
+            // An answer from a connection that has since been replaced says nothing about the new one.
+            guard let self, self.client === client else { return }
+            self.checking = false
             switch r {
             case .success(let open):
                 self.lanFailures = 0
@@ -480,6 +488,9 @@ final class MeasureModel: ObservableObject {
         usingAlternative = false
         controlDiameterMM = nil
         lockedDiagnostics = MeasurementDiagnostics(rep, uncertaintyMM: uncertainty, calibration: calibration)
+        applog("Hull", String(format: "låst %@: %.1f × %.1f mm, ± %.2f, %.2f m, %.0f°, kilde %@, kantpiksler %.0f",
+            byItself ? "selv" : "manuelt", rep.widthMM, rep.heightMM, uncertainty ?? -1, rep.plane.distance, rep.plane.tilt,
+            rep.source.rawValue, rep.edgePixels))
         outlineOnScreen = []
         done = nil
         error = nil

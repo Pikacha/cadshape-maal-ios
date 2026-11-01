@@ -96,6 +96,8 @@ final class CadshapeClient: NSObject, URLSessionDelegate {
     private let lock = NSLock()
     /// Set when this client is replaced: its cancelled requests are not reported.
     private var dead = false
+    /// The web login, read from the keychain once (not on every request, several a second).
+    private lazy var webSession: String = pairing.session ?? ""
 
     init(pairing: Pairing) {
         self.pairing = pairing
@@ -143,7 +145,7 @@ final class CadshapeClient: NSObject, URLSessionDelegate {
         var r = URLRequest(url: pairing.base.appendingPathComponent(path))
         r.httpShouldHandleCookies = false
         if pairing.isOnline {
-            r.setValue("cs_session=\(pairing.session ?? "")", forHTTPHeaderField: "Cookie")
+            r.setValue("cs_session=\(webSession)", forHTTPHeaderField: "Cookie")
         } else {
             r.setValue("cadshape_key=\(pairing.key)", forHTTPHeaderField: "Cookie")
         }
@@ -189,7 +191,9 @@ final class CadshapeClient: NSObject, URLSessionDelegate {
                 }
             }
             DispatchQueue.main.async {
-                if !self.dead { done(result) }
+                // Always answer: a screen waiting for this («Sender …») must not wait forever.
+                // After a switch the answer is a plain failure.
+                done(self.dead ? .failure(.offline("Tilkoblingen ble byttet. Prøv igjen.")) : result)
             }
         }.resume()
     }
@@ -377,7 +381,9 @@ extension CadshapeClient {
                 result = .failure(.refused("Tomt svar fra CadSHAPE."))
             }
             DispatchQueue.main.async {
-                if !self.dead { done(result) }
+                // Always answer: a screen waiting for this («Sender …») must not wait forever.
+                // After a switch the answer is a plain failure.
+                done(self.dead ? .failure(.offline("Tilkoblingen ble byttet. Prøv igjen.")) : result)
             }
         }.resume()
     }

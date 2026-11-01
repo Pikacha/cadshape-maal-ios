@@ -237,9 +237,15 @@ struct BottomPanel: View {
     var body: some View {
         VStack(spacing: 8) {
             WaitingBanner(model: model, store: model.store)
-            ViewThatFits(in: .vertical) {
-                content
-                ScrollView { content }
+            VStack(spacing: 12) {
+                ViewThatFits(in: .vertical) {
+                    content
+                    ScrollView { content }
+                }
+                // The main buttons sit below the scrolling part: always visible.
+                if !model.isCalibrating && !model.mode.isSpace && model.locked && !model.patternLocked {
+                    LockedActions(model: model)
+                }
             }
             .modifier(GlassPanel())
         }
@@ -436,58 +442,58 @@ struct LockedContent: View {
                     }
                 } label: {
                     Label(model.forcedKind?.short ?? "Form", systemImage: "slider.horizontal.3").font(.footnote.weight(.semibold))
+                        .frame(minHeight: 44)
                 }
-            }
-            if let diameter = model.shape?.diameter {
-                DisclosureGroup("Kontrollmål for hullet") {
-                    VStack(alignment: .leading, spacing: 8) {
-                        Text("Oppgi hullets innvendige diameter, ikke innsiden av den printede plastringen. Endrer bare dette hullet.")
-                            .font(.footnote).opacity(0.8)
-                        HStack {
-                            TextField("Diameter i mm", text: $control)
-                                .keyboardType(.decimalPad)
-                                .textFieldStyle(.roundedBorder)
-                                .accessibilityLabel("Hullets innvendige diameter (mm)")
-                            Button("Bruk målet") { model.useControlDiameter(control) }
-                                .disabled(controlDiameter(control) == nil || model.working)
-                        }
-                        if let d = model.controlDiameterMM {
-                            Text("Kontrollmål brukt: Ø \(mm(d)) mm. Kontroller passformen med en liten prøvebit.")
-                                .font(.footnote)
-                        }
-                        if let evidence = model.diagnosticsText {
-                            ShareLink(item: evidence) { Label("Del måledata", systemImage: "square.and.arrow.up") }
-                                .font(.footnote)
-                        }
-                    }
-                    .padding(.top, 6)
-                }
-                .tint(.white)
-                if model.make == .lokk || model.make == .plugg {
-                    let outer = diameter - 2 * (model.params[.clearance] ?? ParamKey.clearance.defaultValue)
-                    Text("Hull Ø \(mm(diameter)) → \(model.make == .lokk ? "kragens" : "pluggens") ytre diameter Ø \(mm(outer)) mm")
-                        .font(.footnote).opacity(0.8)
-                }
-            }
-            if let depth = model.depthMM {
-                Button {
-                    model.useDepth()
-                } label: {
-                    Label("Bruk hullets dybde: \(Int(depth.rounded())) mm", systemImage: "arrow.down.to.line")
-                        .font(.footnote.weight(.semibold))
-                }
-                .buttonStyle(ChipStyle(on: false))
             }
             HStack(spacing: 8) {
                 ForEach(MakeKind.allCases) { k in
                     ChoiceCard(title: k.short, symbol: k.symbol, on: model.make == k) { model.make = k }
                 }
             }
-            Text(model.make.hint).font(.footnote).opacity(0.75)
+            Text(model.make.hint).font(.footnote).foregroundStyle(.secondary)
+            // Everything for fine-tuning in one place: the panel stays short.
             DisclosureGroup(isExpanded: $adjust) {
-                VStack(spacing: 8) {
+                VStack(alignment: .leading, spacing: 10) {
                     ForEach(model.make.uses) { key in
                         ParamRow(key: key, value: model.params[key] ?? key.defaultValue) { model.setParam(key, $0) }
+                    }
+                    if let diameter = model.shape?.diameter, model.make == .lokk || model.make == .plugg {
+                        let outer = diameter - 2 * (model.params[.clearance] ?? ParamKey.clearance.defaultValue)
+                        Text("Hull Ø \(mm(diameter)) → \(model.make == .lokk ? "kragens" : "pluggens") ytre diameter Ø \(mm(outer)) mm")
+                            .font(.footnote).foregroundStyle(.secondary)
+                    }
+                    if let depth = model.depthMM {
+                        Button {
+                            model.useDepth()
+                        } label: {
+                            Label("Bruk hullets dybde: \(Int(depth.rounded())) mm", systemImage: "arrow.down.to.line")
+                                .font(.footnote.weight(.semibold))
+                        }
+                        .buttonStyle(ChipStyle(on: false))
+                    }
+                    if model.shape?.diameter != nil {
+                        Divider().overlay(Color.white.opacity(0.15))
+                        Text("Har du målt selv?").font(.subheadline.weight(.semibold))
+                        Text("Skriv hullets innvendige diameter. Gjelder bare dette hullet.")
+                            .font(.footnote).foregroundStyle(.secondary)
+                        HStack {
+                            TextField("Diameter i mm", text: $control)
+                                .keyboardType(.decimalPad)
+                                .padding(10)
+                                .background(Color.white.opacity(0.1), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+                                .accessibilityLabel("Hullets innvendige diameter (mm)")
+                            Button("Bruk") { model.useControlDiameter(control) }
+                                .buttonStyle(ChipStyle(on: false))
+                                .disabled(controlDiameter(control) == nil || model.working)
+                        }
+                        if let d = model.controlDiameterMM {
+                            Text("Ditt mål brukes: Ø \(mm(d)) mm. Prøv passformen med en liten prøvebit.")
+                                .font(.footnote)
+                        }
+                    }
+                    if let evidence = model.diagnosticsText {
+                        ShareLink(item: evidence) { Label("Del måledata", systemImage: "square.and.arrow.up") }
+                            .font(.footnote)
                     }
                 }
                 .padding(.top, 6)
@@ -498,25 +504,46 @@ struct LockedContent: View {
             if let done = model.done {
                 Label(done, systemImage: "checkmark.circle.fill").font(.subheadline.weight(.semibold)).foregroundStyle(good)
             } else if model.lockedByItself {
-                Label("Låst av seg selv – trykk «Mål på nytt» hvis det ble feil", systemImage: "lock.fill").font(.footnote).opacity(0.7)
+                Label("Låst automatisk. Feil? Trykk «Mål på nytt».", systemImage: "lock.fill").font(.footnote).foregroundStyle(.secondary)
             }
             if let error = model.error {
-                Label(error, systemImage: "exclamationmark.triangle.fill").font(.footnote).foregroundStyle(accent)
+                Label(error, systemImage: "exclamationmark.triangle.fill").font(.footnote).foregroundStyle(bad)
+            }
+        }
+    }
+}
+
+/// The buttons under a locked hole – pinned below the panel, so they never scroll away.
+struct LockedActions: View {
+    @ObservedObject var model: MeasureModel
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            if !model.connected && model.shape != nil {
+                Label("Lagret på telefonen – sendes når CadSHAPE er åpent", systemImage: "tray.fill")
+                    .font(.footnote.weight(.semibold))
+                    .foregroundStyle(good)
             }
             HStack(spacing: 10) {
-                Button {
-                    model.measureAgain()
-                } label: {
-                    Label("Mål på nytt", systemImage: "arrow.counterclockwise")
+                if model.done != nil || !model.connected {
+                    // Sent (or saved for later): the next step is the next hole. «Lag igjen» stays possible.
+                    if model.connected {
+                        Button { model.commit() } label: { Label("Lag igjen", systemImage: "cube") }
+                            .buttonStyle(SecondaryStyle())
+                            .disabled(model.working)
+                    } else {
+                        Button { model.showSettings = true } label: { Label("Koble til", systemImage: "link") }
+                            .buttonStyle(SecondaryStyle())
+                    }
+                    Button { model.measureAgain() } label: { Label("Mål neste", systemImage: "arrow.counterclockwise") }
+                        .buttonStyle(PrimaryStyle())
+                } else {
+                    Button { model.measureAgain() } label: { Label("Mål på nytt", systemImage: "arrow.counterclockwise") }
+                        .buttonStyle(SecondaryStyle())
+                    Button { model.commit() } label: { Label("Lag i CadSHAPE", systemImage: "cube.fill") }
+                        .buttonStyle(PrimaryStyle(enabled: canMake))
+                        .disabled(!canMake)
                 }
-                .buttonStyle(SecondaryStyle())
-                Button {
-                    model.commit()
-                } label: {
-                    Label(model.connected ? "Lag i CadSHAPE" : "Lagret", systemImage: model.connected ? "cube.fill" : "tray.fill")
-                }
-                .buttonStyle(PrimaryStyle(enabled: canMake))
-                .disabled(!canMake)
             }
         }
     }
@@ -555,23 +582,11 @@ struct PatternLockedContent: View {
                 Label(done, systemImage: "checkmark.circle.fill").font(.subheadline.weight(.semibold)).foregroundStyle(good)
             }
             if let error = model.error {
-                Label(error, systemImage: "exclamationmark.triangle.fill").font(.footnote).foregroundStyle(accent)
+                Label(error, systemImage: "exclamationmark.triangle.fill").font(.footnote).foregroundStyle(bad)
             }
-            HStack(spacing: 10) {
-                Button {
-                    model.newPattern()
-                } label: {
-                    Label("Nytt mønster", systemImage: "arrow.counterclockwise")
-                }
-                .buttonStyle(SecondaryStyle())
-                Button {
-                    model.commitPattern()
-                } label: {
-                    Label(model.connected ? "Lag i CadSHAPE" : "Lagret", systemImage: model.connected ? "cube.fill" : "tray.fill")
-                }
-                .buttonStyle(PrimaryStyle(enabled: model.connected && !model.working))
-                .disabled(!model.connected || model.working)
-            }
+            CommitButtons(connected: model.connected, done: model.done != nil, working: model.working,
+                          again: "Nytt mønster", measureAgain: model.newPattern, commit: model.commitPattern,
+                          connect: { model.showSettings = true })
         }
     }
 }
@@ -624,10 +639,16 @@ struct SavedSheet: View {
         NavigationStack {
             List {
                 if let problem {
-                    Text(problem).font(.footnote).foregroundStyle(accent)
+                    Text(problem).font(.footnote).foregroundStyle(bad)
                 }
-                if store.items.isEmpty {
-                    Text("Ingen målinger ennå. Alt du låser lagres her – hull, mønstre, bokser og ting – også når CadSHAPE ikke er åpent.").font(.footnote).foregroundStyle(.secondary)
+                if !model.connected && !store.waiting.isEmpty {
+                    Label("Ikke koblet til – sendes når CadSHAPE er åpent", systemImage: "wifi.slash")
+                        .font(.footnote).foregroundStyle(.secondary)
+                }
+                if model.connected && store.waiting.count > 1 {
+                    Button { store.waiting.forEach(send) } label: {
+                        Label("Send alle \(store.waiting.count) som venter", systemImage: "tray.and.arrow.up.fill")
+                    }
                 }
                 ForEach(store.items) { m in
                     HStack(spacing: 12) {
@@ -663,14 +684,15 @@ struct SavedSheet: View {
                     }
                 }
             }
+            .overlay {
+                if store.items.isEmpty {
+                    ContentUnavailableView("Ingen målinger ennå", systemImage: "tray",
+                        description: Text("Alt du låser havner her, også uten tilkobling."))
+                }
+            }
             .navigationTitle("Målinger")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
-                ToolbarItem(placement: .cancellationAction) {
-                    if model.connected && !store.waiting.isEmpty {
-                        Button("Send alle") { store.waiting.forEach(send) }
-                    }
-                }
                 ToolbarItem(placement: .confirmationAction) {
                     Button("Ferdig") { model.showSaved = false }
                 }
@@ -849,16 +871,19 @@ struct SettingsSheet: View {
                 } footer: {
                     Text("Låser bare når målet er stødig og skarpt nok. Er kanten grov, låser du selv – mål med skyvelære før deler som skal sitte stramt.")
                 }
-                Section("Slik måler appen") {
-                    Text("Kanten på hullet finnes i kamerabildet (eller i LiDAR-dybden når hullet ikke skiller seg ut). LiDAR måler flaten rundt hullet – avstand og vinkel – og kanten legges ned på flaten i millimeter. Anslått avvik tar med variasjon, pikseloppløsning og flaten. Det er ikke en kalibrert garanti for passform. Bruk kontrollmål for små, trange hull. LiDAR kan også anslå dybden.")
-                        .font(.footnote)
-                    Text("Best resultat: 30–80 cm unna, mest mulig rett på, godt lys og hele kanten i bildet.")
-                        .font(.footnote)
-                    Text("Ser appen to kanter rundt hullet (skygge, fas eller hullets innside), låser den ikke av seg selv – du velger kanten etter låsing.")
-                        .font(.footnote)
-                    Text("Inni boks og Gjenstand bruker LiDAR-punktene fra flere bilder samlet: bunnen, de fire veggene og kanten øverst (boks), eller bordet og alt som står opp fra det (gjenstand). Hold telefonen 25–60 cm over, rett ned. Tomme bokser og ryddige bord gir best mål; svarte og blanke flater ser LiDAR dårlig.")
-                        .font(.footnote)
-                    Text(appVersionText).font(.footnote).opacity(0.6)
+                Section {
+                    // Numbers, hints and errors of the last minutes – no pictures or passwords.
+                    ShareLink(item: model.problemReport(), subject: Text("CadSHAPE Mål – problem"),
+                              message: Text("Hva skjedde, og hva forventet du?")) {
+                        Label("Rapporter problem", systemImage: "exclamationmark.bubble")
+                    }
+                } footer: {
+                    Text("Lager en tekst med appens siste hendelser og målinger (ingen bilder eller passord) som du kan sende.")
+                }
+                Section {
+                    // The long explanation on its own page: the sheet stays short.
+                    NavigationLink("Slik måler appen") { HowItMeasures() }
+                    Text(appVersionText).font(.footnote).foregroundStyle(.secondary)
                 }
             }
             .navigationTitle("CadSHAPE Mål")
@@ -871,6 +896,28 @@ struct SettingsSheet: View {
         }
         .onAppear { if let s = model.webSuggestion { web = s } }
         .preferredColorScheme(.dark)
+    }
+}
+
+/// «Slik måler appen»: what the numbers rest on, and how to get good ones.
+struct HowItMeasures: View {
+    var body: some View {
+        Form {
+            Section {
+                    Text("Kanten på hullet finnes i kamerabildet (eller i LiDAR-dybden når hullet ikke skiller seg ut). LiDAR måler flaten rundt hullet – avstand og vinkel – og kanten legges ned på flaten i millimeter. Anslått avvik tar med variasjon, pikseloppløsning og flaten. Det er ikke en kalibrert garanti for passform. Bruk kontrollmål for små, trange hull. LiDAR kan også anslå dybden.")
+                        .font(.footnote)
+                    Text("Best resultat: 30–80 cm unna, mest mulig rett på, godt lys og hele kanten i bildet.")
+                        .font(.footnote)
+                    Text("Ser appen to kanter rundt hullet (skygge, fas eller hullets innside), låser den ikke av seg selv – du velger kanten etter låsing.")
+                        .font(.footnote)
+                    Text("Inni boks og Omriss av ting bruker LiDAR-punktene fra flere bilder samlet: bunnen, de fire veggene og kanten øverst (boks), eller bordet og alt som står opp fra det (ting). Hold telefonen 25–60 cm over, rett ned. Tomme bokser og ryddige bord gir best mål; svarte og blanke flater ser LiDAR dårlig. Tynne, flate ting finnes i kamerabildet.")
+                        .font(.footnote)
+                    Text("3D-skann («Skann en ting») gir formen med noen millimeters nøyaktighet – godt nok til holdere og lommer, ikke til stramme passformer. Mål hull og kanter som må passe med Hull-modus.")
+                        .font(.footnote)
+            }
+        }
+        .navigationTitle("Slik måler appen")
+        .navigationBarTitleDisplayMode(.inline)
     }
 }
 
