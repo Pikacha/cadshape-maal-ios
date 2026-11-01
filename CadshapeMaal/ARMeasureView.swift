@@ -68,10 +68,13 @@ final class Measurer: NSObject, ARSessionDelegate {
         self.config = config
         config.planeDetection = [.horizontal, .vertical]
         config.isAutoFocusEnabled = true
-        // Use depth paired with this capturedImage. Temporal smoothing is for visuals and can lag motion.
+        // Both: the smoothed depth gives a calm, accurate wall round a hole and a clean point cloud
+        // (the raw depth alone made the wall fit fail often, so the hole kept disappearing);
+        // the raw depth is there as a fallback.
         if ARWorldTrackingConfiguration.supportsFrameSemantics(.sceneDepth) {
             config.frameSemantics.insert(.sceneDepth)
-        } else if ARWorldTrackingConfiguration.supportsFrameSemantics(.smoothedSceneDepth) {
+        }
+        if ARWorldTrackingConfiguration.supportsFrameSemantics(.smoothedSceneDepth) {
             config.frameSemantics.insert(.smoothedSceneDepth)
         }
         model.hasLidar = ARWorldTrackingConfiguration.supportsFrameSemantics(.sceneDepth)
@@ -111,7 +114,9 @@ final class Measurer: NSObject, ARSessionDelegate {
         let cameraToWorld = frame.camera.transform
         let imageWidth = Double(frame.camera.imageResolution.width)
         var fallback: Plane? = nil
-        if measuring && frame.smoothedSceneDepth == nil && frame.sceneDepth == nil {
+        // ARKit's own plane under the cross-hair: used when the LiDAR points round the hole do not
+        // give a wall (cluttered edge, glossy surface) instead of losing the hole.
+        if measuring {
             fallback = FrameReader.raycastPlane(session, frame, at: seed)
         }
 
@@ -160,13 +165,18 @@ final class Measurer: NSObject, ARSessionDelegate {
             if measuring, let gray = FrameReader.gray(frame.capturedImage) {
                 gw = Double(gray.width)
                 gh = Double(gray.height)
-                let depth = (frame.sceneDepth ?? frame.smoothedSceneDepth).flatMap { FrameReader.depth($0) }
-                let input = FrameInput(
-                    gray: gray, scale: imageWidth / gw, intrinsics: FrameReader.intrinsics(frame.camera),
-                    depth: depth, fallbackPlane: fallback, seed: P2(Double(seed.x) * gw, Double(seed.y) * gh),
-                    usedSmoothedDepth: frame.sceneDepth == nil && frame.smoothedSceneDepth != nil
-                )
-                result = measureFrame(input)
+                let smoothed = frame.smoothedSceneDepth.flatMap { FrameReader.depth($0) }
+                let raw = frame.sceneDepth.flatMap { FrameReader.depth($0) }
+                let K = FrameReader.intrinsics(frame.camera)
+                let seedPoint = P2(Double(seed.x) * gw, Double(seed.y) * gh)
+                func run(_ depth: DepthMap?, smoothedDepth: Bool) -> Result<FrameMeasurement, MeasureFailure> {
+                    measureFrame(FrameInput(gray: gray, scale: imageWidth / gw, intrinsics: K, depth: depth,
+                        fallbackPlane: fallback, seed: seedPoint, usedSmoothedDepth: smoothedDepth))
+                }
+                // Smoothed depth first (calm wall); the raw depth if that found nothing.
+                var r = run(smoothed ?? raw, smoothedDepth: smoothed != nil)
+                if case .failure = r, smoothed != nil, raw != nil { r = run(raw, smoothedDepth: false) }
+                result = r
             }
             let w = gw, h = gh
             DispatchQueue.main.async {

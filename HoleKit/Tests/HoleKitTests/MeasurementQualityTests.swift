@@ -41,10 +41,22 @@ final class MeasurementQualityTests: XCTestCase {
             case 2: bad.edgePixels = 14
             case 3: bad.planePoints = 0
             case 4: bad.planeInlierRatio = 0.4
-            default: bad.usedSmoothedDepth = true
+            default: bad.source = .depth
             }
             XCTAssertFalse(measurementQuality(Array(repeating: bad, count: 8), trackingNormal: true).canAutoLock, "bad measurement \(change)")
         }
+    }
+
+    func testLargeSteadyHoleCanStillLockByItself() {
+        // 68 mm: the old fixed 0,5 mm limit meant big holes never locked by themselves.
+        let points = (0..<72).map { P2(34 * cos(Double($0) * .pi / 36), 34 * sin(Double($0) * .pi / 36)) }
+        var m = result(outlineGray: points, mm: points, plane: Plane(normal: V3(0, 0, 1), offset: 0.45), used: 300, source: .picture)
+        m.edgeResolutionMM = 0.4
+        m.edgePixels = 120
+        m.planeResidualMM = 1.5
+        m.planeInlierRatio = 0.7
+        m.usedSmoothedDepth = true
+        XCTAssertTrue(measurementQuality(Array(repeating: m, count: 8), trackingNormal: true).canAutoLock)
     }
 
     func testEqualAreaButChangingDimensionsIsNotSteady() {

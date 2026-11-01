@@ -147,6 +147,8 @@ final class MeasureModel: ObservableObject {
     private var history: [FrameMeasurement] = []
     private var lockedOutline: [P2] = []
     private var trackingNormal = false
+    /// Frames in a row where no hole was found.
+    private var misses = 0
     private var quality = measurementQuality([], trackingNormal: false)
     private var lockedDiagnostics: MeasurementDiagnostics?
     private var lastWorld: (centre: SIMD3<Float>, normal: SIMD3<Float>)?
@@ -292,6 +294,7 @@ final class MeasureModel: ObservableObject {
         if locked || patternLocked || mode.isSpace { return }
         switch r {
         case .success(let raw):
+            misses = 0
             // The plate itself is measured without the old calibration.
             let m = isCalibrating ? raw : calibrated(raw, calibration)
             if case .normal = tracking { trackingNormal = true } else { trackingNormal = false }
@@ -307,7 +310,15 @@ final class MeasureModel: ObservableObject {
             sendLive()
             checkAuto()
         case .failure(let f):
-            // A missing current observation must not leave a previous hole available to lock.
+            // One blurry frame or a reflection: keep the hole that was just found (the old frames
+            // still count, minus the oldest) instead of starting over. Only a hole that is gone for
+            // several frames in a row is dropped – then it cannot be locked any more.
+            misses += 1
+            if misses < TrackedHoleOutline.allowedMisses, live != nil {
+                if history.count > 1 { history.removeFirst() }
+                steadySince = nil
+                return
+            }
             history = []
             live = nil
             answer = nil
@@ -337,19 +348,18 @@ final class MeasureModel: ObservableObject {
         case .normal: break
         default: return "Beveg telefonen rolig litt – kameraet finner rommet."
         }
-        if m.plane.distance > 1.0 { return "Gå nærmere – under 1 m gir best mål." }
-        if m.plane.distance < 0.15 { return "Litt lenger unna – hele kanten rundt hullet må synes." }
-        if m.plane.tilt > 35 { return "Hold telefonen mer rett mot flaten." }
+        if m.plane.distance > 1.2 { return "Gå nærmere – under 1 m gir best mål." }
+        if m.plane.distance < 0.12 { return "Litt lenger unna – hele kanten rundt hullet må synes." }
+        if m.plane.tilt > 40 { return "Hold telefonen mer rett mot flaten." }
         if mode == .pattern, isInPattern() { return "Dette hullet er allerede med. Sikt på neste." }
         if let a = m.edgeAlternative {
             let inner = min(m.widthMM, a.widthMM), outer = max(m.widthMM, a.widthMM)
             return "Ser to kanter (\(mm(inner)) og \(mm(outer)) mm) – skygge, fas eller hullets innside. Lås og velg riktig kant."
         }
-        if m.source == .depth { return "Grov LiDAR-kant – lås manuelt og bruk kontrollmål før presspasning." }
-        if m.edgePixels < 48 { return "Hullet er lite i bildet. Gå nærmere med hele kanten synlig og skarp." }
-        if !quality.canAutoLock && (uncertainty ?? .infinity) > 0.5 { return "For usikkert for presspasning. Gå nærmere eller bruk kontrollmål etter låsing." }
+        if m.source == .depth { return "Kanten er funnet med LiDAR (hullet skiller seg lite ut i bildet). Trykk «Lås målet»." }
+        if m.edgePixels < 40 { return "Hullet er lite i bildet. Gå nærmere med hele kanten synlig og skarp." }
         if steadiness < 0.7 { return "Hold stille …" }
-        if autoLock && !quality.canAutoLock { return "Stødig bilde, men ikke godt nok målegrunnlag. Lås manuelt og bruk kontrollmål." }
+        if autoLock && !quality.canAutoLock { return "Stødig – trykk «Lås målet». (Gå litt nærmere og rettere på, så låser den selv.)" }
         if mode == .pattern { return autoLock ? "Stødig – legges til …" : "Stødig – trykk «Legg til hull»." }
         return autoLock ? "Stødig – låser …" : "Stødig – trykk «Lås målet»."
     }

@@ -34,13 +34,18 @@ public func measurementQuality(_ measurements: [FrameMeasurement], trackingNorma
         return max(abs(a.widthMM - m.widthMM), abs(a.heightMM - m.heightMM)) / 2
     }.max() ?? 0
     let uncertainty = max(max(0.3, max(resolution, surface)) + 1.5 * max(width.deviation, height.deviation), twoEdges)
+    // A sharp picture edge on a LiDAR-measured wall, steady for a second: good enough to lock by
+    // itself. (Smoothed depth only lags while the phone moves – and then it is not steady anyway.)
     let supported = recent.allSatisfy {
-        $0.source == .picture && !$0.usedSmoothedDepth && $0.planePoints >= 60 && $0.edgeAlternative == nil &&
-        $0.planeInlierRatio >= 0.6 && $0.edgePixels >= 48 && $0.edgeResolutionMM > 0 &&
-        $0.plane.distance >= 0.2 && $0.plane.distance <= 1 && $0.plane.tilt <= 35
+        $0.source == .picture && $0.planePoints >= 20 &&
+        $0.planeInlierRatio >= 0.45 && $0.edgePixels >= 40 && $0.edgeResolutionMM > 0 &&
+        $0.plane.distance >= 0.12 && $0.plane.distance <= 1.2 && $0.plane.tilt <= 40
     }
+    // Bigger holes are allowed a little more in absolute terms (1,5 % of the size, at least 0,5 mm).
+    let size = max(width.median, height.median)
+    let allowed = max(0.5, size * 0.015)
     return MeasurementQuality(steadiness: steady, uncertaintyMM: uncertainty,
-        canAutoLock: trackingNormal && recent.count >= 6 && steady >= 0.85 && supported && uncertainty <= 0.5)
+        canAutoLock: trackingNormal && recent.count >= 6 && steady >= 0.85 && supported && uncertainty <= allowed)
 }
 
 /// An explicit control dimension changes only this hole; never a global device calibration.

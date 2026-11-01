@@ -128,8 +128,9 @@ public func fitPlane(_ pts: [V3], iterations: Int = 150, threshold: Double = 0.0
     guard let found = best else { return nil }
     let rough = found.0
     let inliers = pts.filter { abs(vdot(rough.normal, $0) - rough.offset) < threshold }
-    // RANSAC always finds some plane, even in a random cloud. Require broad support.
-    if inliers.count < max(12, Int(ceil(Double(pts.count) * 0.6))) { return nil }
+    // RANSAC always finds some plane, even in a random cloud. Require broad support – but not so
+    // broad that raw LiDAR noise, a frame edge or a switch on the wall throws a real wall away.
+    if inliers.count < max(12, Int(ceil(Double(pts.count) * 0.4))) { return nil }
     guard let refined = leastSquaresPlane(inliers) else { return nil }
     return (refined, inliers.count)
 }

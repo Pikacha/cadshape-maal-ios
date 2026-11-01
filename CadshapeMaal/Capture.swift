@@ -37,6 +37,11 @@ final class CaptureModel: ObservableObject {
     @Published var error: String?
     @Published var trackingHint: String?
     @Published var stalled = false
+    /// How many pictures the phone can use at most (Object Capture's own limit).
+    @Published var maxShots = 0
+    /// Shots at the start of this round (the round's own progress).
+    @Published var roundStart = 0
+    @Published var canShoot = false
 
     let api: CadshapeClient?
     private var folder: URL?
@@ -100,9 +105,24 @@ final class CaptureModel: ObservableObject {
         guard session === s else { return }
         if shots != s.numberOfShotsTaken { lastProgress = Date() }
         shots = s.numberOfShotsTaken
+        maxShots = s.maximumNumberOfInputImages
+        canShoot = s.canRequestImageCapture
         passDone = s.userCompletedScanPass
         trackingHint = guidance(s)
-        stalled = !passDone && Date().timeIntervalSince(lastProgress) > 20
+        stalled = step == .capturing && !passDone && Date().timeIntervalSince(lastProgress) > 15
+    }
+
+    /// 0…1: how full the phone's picture budget is.
+    var overall: Double { maxShots > 0 ? min(1, Double(shots) / Double(maxShots)) : 0 }
+    /// Pictures in this round. A round round the thing is usually 30–60 pictures.
+    var roundShots: Int { max(0, shots - roundStart) }
+    /// Rounds that give a good model: high, middle, low (or flipped for the bottom).
+    static let goodRounds = 3
+
+    /// A picture now (when auto capture holds back, e.g. standing still at a tricky angle).
+    func shoot() {
+        guard let session, session.canRequestImageCapture else { return }
+        session.requestImageCapture()
     }
 
     private func changed(_ st: ObjectCaptureSession.CaptureState) {
@@ -117,12 +137,22 @@ final class CaptureModel: ObservableObject {
         case .capturing: step = .capturing
         case .finishing: step = .finishing
         case .completed:
-            // The capture's camera must be gone before the model is made (memory).
+            // The capture session (camera, ~1 GB) must be completely gone before the model is made,
+            // or the photogrammetry runs out of memory and hangs. Our own state listener held on
+            // to it, so stop that too, and give SwiftUI a moment to remove the camera view.
             timer?.invalidate()
+            watching?.cancel()
+            watching = nil
             session = nil
-            reconstruct()
+            step = .reconstructing(0)
+            Task { [weak self] in
+                try? await Task.sleep(nanoseconds: 800_000_000)
+                self?.reconstruct()
+            }
         case .failed(let e):
             timer?.invalidate()
+            watching?.cancel()
+            watching = nil
             session = nil
             step = .failed("Skanningen stoppet: \(e.localizedDescription)")
         @unknown default:
@@ -173,10 +203,14 @@ final class CaptureModel: ObservableObject {
     func newPass() {
         session?.beginNewScanPass()
         passes += 1
+        roundStart = shots
+        lastProgress = Date()
     }
     func flip() {
         session?.beginNewScanPassAfterFlip()
         passes += 1
+        roundStart = shots
+        lastProgress = Date()
     }
     func finish() { session?.finish() }
 
@@ -199,6 +233,7 @@ final class CaptureModel: ObservableObject {
         error = nil
         trackingHint = nil
         stalled = false
+        roundStart = 0
         step = .starting
         start()
     }
@@ -208,26 +243,45 @@ final class CaptureModel: ObservableObject {
         guard let images, let checkpoints, let folder else { return }
         step = .reconstructing(0)
         let out = folder.appendingPathComponent("modell.usdz")
+        let count = (try? FileManager.default.contentsOfDirectory(atPath: images.path).count) ?? 0
+        guard count >= 10 else {
+            step = .failed("Bare \(count) bilder ble tatt – for lite til en modell. Gå sakte en hel runde rundt tingen.")
+            return
+        }
         Task { [weak self] in
             do {
                 var cfg = PhotogrammetrySession.Configuration()
                 cfg.checkpointDirectory = checkpoints
+                // The pictures were taken one after another round the thing: faster and steadier.
+                cfg.sampleOrdering = .sequential
+                cfg.isObjectMaskingEnabled = true
                 let ps = try PhotogrammetrySession(input: images, configuration: cfg)
                 try ps.process(requests: [.modelFile(url: out)])
+                var finished = false
                 for try await output in ps.outputs {
                     switch output {
                     case .requestProgress(_, let fraction):
                         self?.step = .reconstructing(fraction)
                     case .requestError(_, let error):
                         throw error
+                    case .requestComplete:
+                        if !finished, FileManager.default.fileExists(atPath: out.path) {
+                            finished = true
+                            await self?.loaded(out)
+                        }
                     case .processingComplete:
-                        await self?.loaded(out)
+                        if !finished {
+                            finished = true
+                            await self?.loaded(out)
+                        }
+                    case .processingCancelled:
+                        self?.step = .failed("Modellen ble avbrutt. Prøv igjen og hold appen åpen mens den lages.")
                     default:
                         break
                     }
                 }
             } catch {
-                self?.step = .failed("Kunne ikke lage modellen: \(error.localizedDescription). Prøv med mer lys og flere bilder.")
+                self?.step = .failed("Kunne ikke lage modellen: \(error.localizedDescription). Prøv med mer lys, matt underlag og en runde til.")
             }
         }
     }
@@ -347,7 +401,12 @@ struct CaptureScreen: View {
     var body: some View {
         ZStack {
             if let session = cap.session {
-                ObjectCaptureView(session: session).ignoresSafeArea()
+                if cap.passDone && cap.step == .capturing {
+                    // Between rounds: what has been covered so far (Apple's point cloud, turnable).
+                    ObjectCapturePointCloudView(session: session).ignoresSafeArea()
+                } else {
+                    ObjectCaptureView(session: session).ignoresSafeArea()
+                }
             } else {
                 ground.ignoresSafeArea()
             }
@@ -361,8 +420,8 @@ struct CaptureScreen: View {
                     }
                     .accessibilityLabel("Avbryt skanningen")
                     Spacer()
-                    if cap.step == .capturing || cap.step == .detecting {
-                        Text("\(cap.shots) bilder, runde \(cap.passes)")
+                    if cap.step == .capturing {
+                        Text("\(cap.roundShots) bilder denne runden")
                             .font(.subheadline.weight(.semibold))
                             .padding(.horizontal, 14)
                             .padding(.vertical, 10)
@@ -398,19 +457,27 @@ struct CaptureScreen: View {
                 Text("Dra i hjørnene til boksen så vidt rommer den.").font(.subheadline).opacity(0.8)
                 Button("Start skanningen") { cap.capture() }.buttonStyle(PrimaryStyle())
             case .capturing:
+                progress
                 if cap.passDone {
-                    Text("Runde \(cap.passes) er ferdig").font(.headline)
-                    Text(cap.passes == 1 ? "En runde til, lavere ned, gir sidene og undersiden. Eller snu tingen for bunnen." : "Har du sett tingen fra alle kanter, kan du lage modellen nå.").font(.subheadline).opacity(0.8)
+                    Text("Runde \(cap.passes) av \(CaptureModel.goodRounds) er ferdig").font(.headline)
+                    Text("Bildet bak viser det som er skannet så langt – hull i prikkskyen er steder kameraet ikke har sett.").font(.footnote).opacity(0.75)
+                    Text(nextRoundText).font(.subheadline).opacity(0.85)
                     HStack(spacing: 8) {
                         Button("Ny runde") { cap.newPass() }.buttonStyle(SecondaryStyle())
                         Button("Snu den") { cap.flip() }.buttonStyle(SecondaryStyle())
                     }
-                    Button("Ferdig, lag modellen") { cap.finish() }.buttonStyle(PrimaryStyle())
+                    Button(cap.passes >= CaptureModel.goodRounds ? "Ferdig, lag modellen" : "Lag modellen nå likevel") { cap.finish() }
+                        .buttonStyle(PrimaryStyle())
                 } else {
-                    Text("Gå sakte rundt tingen").font(.headline)
-                    Text("Hold avstanden og la ringen fylle seg. Telefonen tar bildene selv.").font(.subheadline).opacity(0.8)
-                    if cap.shots > 20 {
-                        Button("Ferdig nå") { cap.finish() }.buttonStyle(SecondaryStyle())
+                    Text(roundTitle).font(.headline)
+                    Text("Gå sakte rundt hele tingen og hold samme avstand. Den hvite ringen på bakken fylles der bildene er tatt – runden er ferdig når ringen er full.").font(.subheadline).opacity(0.8)
+                    HStack(spacing: 8) {
+                        if cap.canShoot {
+                            Button("Ta bilde") { cap.shoot() }.buttonStyle(SecondaryStyle())
+                        }
+                        if cap.shots >= 20 {
+                            Button("Ferdig nå") { cap.finish() }.buttonStyle(SecondaryStyle())
+                        }
                     }
                 }
             case .finishing:
@@ -433,14 +500,53 @@ struct CaptureScreen: View {
                 if let error = cap.error {
                     Text(error).font(.subheadline).foregroundStyle(.orange)
                 }
-                if cap.stalled && cap.step != .finishing {
-                    Text("Ingen fremdrift ennå. Start kameraet på nytt, eller gå til Hjem → Mål raskt → Ting for en enklere form med mål.")
+                if cap.stalled {
+                    Text("Ingen nye bilder på en stund. Gå videre rundt tingen (ikke bare vri telefonen), hold tingen midt i bildet, eller trykk «Ta bilde». Har du \(cap.shots >= 20 ? "nok bilder, trykk «Ferdig nå»." : "under 20 bilder, start på nytt med mer lys.")")
                         .font(.footnote)
-                    Button("Start kameraet på nytt") { cap.again() }.buttonStyle(SecondaryStyle())
+                    if cap.shots < 20 {
+                        Button("Start kameraet på nytt") { cap.again() }.buttonStyle(SecondaryStyle())
+                    }
                 }
             }
         }
         .modifier(GlassPanel())
+    }
+
+    /// Where in the scan we are: the rounds as steps, and the pictures against the phone's limit.
+    @ViewBuilder private var progress: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 6) {
+                ForEach(1...CaptureModel.goodRounds, id: \.self) { r in
+                    Capsule()
+                        .fill(r < cap.passes || (r == cap.passes && cap.passDone) ? accent : (r == cap.passes ? Color.white.opacity(0.55) : Color.white.opacity(0.18)))
+                        .frame(height: 6)
+                }
+            }
+            HStack {
+                Text("Runde \(cap.passes) av \(CaptureModel.goodRounds)")
+                Spacer()
+                Text(cap.maxShots > 0 ? "\(cap.shots) av maks \(cap.maxShots) bilder" : "\(cap.shots) bilder")
+                    .monospacedDigit()
+            }
+            .font(.caption.weight(.semibold))
+            .opacity(0.85)
+        }
+    }
+
+    private var roundTitle: String {
+        switch cap.passes {
+        case 1: return "Runde 1: rundt tingen, litt ovenfra"
+        case 2: return "Runde 2: rundt tingen, i høyde med den"
+        default: return "Runde \(cap.passes): rundt tingen, lavt / undersiden"
+        }
+    }
+
+    private var nextRoundText: String {
+        switch cap.passes {
+        case 1: return "Neste: en runde i høyde med tingen. Det gir sidene skarpe. («Snu den» bare hvis bunnen må med og tingen er stiv og mønstret.)"
+        case 2: return "Neste: en lav runde, eller snu tingen for bunnen. Tre runder gir klart best modell."
+        default: return "Tingen er sett fra alle kanter. Lag modellen nå – det tar 1–3 minutter på telefonen."
+        }
     }
 
     @ViewBuilder private var done: some View {

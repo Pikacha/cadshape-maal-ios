@@ -31,11 +31,14 @@ final class TrackedOutlineTests: XCTestCase {
         XCTAssertEqual(points.last?.y ?? 0, 260, accuracy: 0.001)
     }
 
-    func testLostDetectionClearsPreviousHole() {
+    func testOneMissedFrameKeepsTheHoleButALostHoleGoes() {
         var outline = TrackedHoleOutline()
         outline.update(measurement(), intrinsics: lens, scale: 2, pose: original, timestamp: 10)
-        outline.update(nil, intrinsics: lens, scale: 2, pose: original, timestamp: 10.1)
-        XCTAssertTrue(outline.projected(intrinsics: lens, pose: original, timestamp: 10.1).isEmpty)
+        outline.update(nil, intrinsics: lens, scale: 2, pose: original, timestamp: 10.12)
+        XCTAssertEqual(outline.projected(intrinsics: lens, pose: original, timestamp: 10.12).count, 4, "one blurry frame must not blink the circle off")
+        outline.update(nil, intrinsics: lens, scale: 2, pose: original, timestamp: 10.24)
+        outline.update(nil, intrinsics: lens, scale: 2, pose: original, timestamp: 10.36)
+        XCTAssertTrue(outline.projected(intrinsics: lens, pose: original, timestamp: 10.36).isEmpty)
     }
 
     func testStalledAnalysisDoesNotLeavePhantomOutline() {
