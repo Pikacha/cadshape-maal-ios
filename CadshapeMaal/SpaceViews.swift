@@ -124,12 +124,16 @@ struct SpaceLiveContent: View {
         switch model.mode {
         case .box:
             guard let b = space.box else { return "Sikt på bunnen" }
+            // ± 20 mm is not a measure: say so instead of showing numbers that look exact.
+            if b.spread > max(3, 0.08 * min(b.width, b.length)) { return "Ser ikke boksen ennå" }
             return "\(mm(b.width, digits: 0)) × \(mm(b.length, digits: 0))" + (b.height.map { " × \(mm($0, digits: 0))" } ?? "") + " mm"
         case .object:
             guard let o = space.object else { return "Sikt på tingen" }
             return "\(mm(o.width, digits: 0)) × \(mm(o.length, digits: 0)) mm, \(mm(o.height, digits: 0)) høy"
         case .pipe:
             guard let p = space.pipe else { return "Sikt på røret" }
+            // Only the front of the pipe seen: a short arc fits any diameter (a Ø38 bottle read as Ø84).
+            if p.coverage > 0 && p.coverage < 70 { return "Se mer av røret" }
             return "Ø \(mm(p.diameter)) mm"
         default:
             return space.surface == nil ? "Sikt på en flate" : (space.firstSurface == nil ? "Flate 1" : "Flate 2")
@@ -140,7 +144,7 @@ struct SpaceLiveContent: View {
         switch model.mode {
         case .box: return space.box.map { "± \(mm($0.spread)) mm" }
         case .object: return space.object.map { $0.sharpened ? "± 0,7 mm (kanten fra bildet)" : "± 2 mm (LiDAR)" }
-        case .pipe: return space.pipe.map { "avvik fra sylinder \(mm($0.residual)) mm" }
+        case .pipe: return space.pipe.map { $0.coverage > 0 && $0.coverage < 70 ? "bare \(Int($0.coverage))° av runden sett" : "avvik fra sylinder \(mm($0.residual)) mm" }
         default: return nil
         }
     }

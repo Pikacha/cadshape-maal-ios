@@ -397,7 +397,11 @@ final class SpaceModel: ObservableObject {
         diameters.append(fit.diameter)
         if diameters.count > 8 { diameters.removeFirst(diameters.count - 8) }
         steadiness = agreement([diameters], absMM: 0.5, relative: 0.01)
-        hint = fit.residual > 2 ? "Ujevn flate – er det et rør? Gå litt nærmere." : steadyHint
+        if fit.coverage > 0 && fit.coverage < 70 {
+            hint = "Ser bare forsiden. Gå rundt røret – eller bruk «Skann en ting» for flasker og små ting."
+        } else {
+            hint = fit.residual > 2 ? "Ujevn flate – er det et rør? Gå litt nærmere." : steadyHint
+        }
         // A short arc (seen only from the front) can be any diameter: not locked by itself.
         checkAuto(ready: fit.residual <= 2 && (fit.coverage == 0 || fit.coverage >= 70))
     }

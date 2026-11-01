@@ -202,7 +202,7 @@ struct HomeView: View {
                 Image(systemName: "viewfinder").font(.system(size: 30, weight: .semibold))
                 Spacer(minLength: 24)
                 Text("Skann en ting").font(.title2.bold())
-                Text("Gå rundt den. Få en ekte 3D-modell å bygge holder, lokk eller lomme rundt.")
+                Text("Gå rundt den. Få hele modellen med alle mål – som deler du kan endre i CadSHAPE.")
                     .font(.subheadline)
                     .multilineTextAlignment(.leading)
                     .opacity(0.85)

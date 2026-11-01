@@ -30,8 +30,11 @@ final class CaptureModel: ObservableObject {
     @Published var modelURL: URL?
     @Published var name = ""
     @Published var sending = false
-    /// «Skann → holder»: CadSHAPE makes a holder shaped after the scan as soon as it arrives.
-    @Published var makeHolder = true
+    /// What CadSHAPE makes when the scan arrives: «cad» (parts with measures you can change),
+    /// «holder» (a holder shaped after the scan) or «none» (just the scan as a reference).
+    @Published var make = "cad"
+    /// «Finn målene»: the scan as cylinders, cones, boxes and outlines with measures (HoleKit ScanShapes).
+    @Published var shapes: ScanShapes?
     @Published var sent: String?
     @Published var notes: [String] = []
     @Published var error: String? { didSet { if let e = error { applog("3D-skann feil", e) } } }
@@ -246,6 +249,7 @@ final class CaptureModel: ObservableObject {
     func again() {
         cancel()
         mesh = nil
+        shapes = nil
         modelURL = nil
         sent = nil
         notes = []
@@ -325,6 +329,8 @@ final class CaptureModel: ObservableObject {
         guard let cad else { step = .failed("Modellen var tom. Prøv igjen med tingen midt i bildet."); return }
         mesh = cad
         modelURL = url
+        shapes = await Task.detached(priority: .userInitiated) { fitScanShapes(cad) }.value
+        if let s = shapes { applog("Finn målene", s.lines.joined(separator: " · ")) }
         step = .done
         UINotificationFeedbackGenerator().notificationOccurred(.success)
     }
@@ -340,11 +346,11 @@ final class CaptureModel: ObservableObject {
         error = nil
         let s = mesh.size
         let name = self.name.trimmingCharacters(in: .whitespaces).isEmpty ? "Skann" : self.name
-        let holder = makeHolder
+        let make = self.make
         Task { [weak self] in
             let stl = await Task.detached { binarySTL(mesh, header: "CadSHAPE Maal - Object Capture").base64EncodedString() }.value
             let body: [String: Any] = [
-                "type": "mesh", "role": "ting", "name": name, "stl": stl, "make": holder ? "holder" : "none",
+                "type": "mesh", "role": "ting", "name": name, "stl": stl, "make": make,
                 "size": [s.x, s.y, s.z].map { ($0 * 10).rounded() / 10 },
                 "notes": ["3D-skann fra telefonen (Object Capture, \(mesh.triangleCount) trekanter). Mål kritiske hull med Hull-modus."],
             ]
@@ -357,7 +363,10 @@ final class CaptureModel: ObservableObject {
                     self.sent = result?["label"] as? String ?? "Sendt til CadSHAPE"
                     let lib = (j["library"] as? [[String: Any]] ?? []).compactMap { $0["name"] as? String }
                     self.notes = lib.isEmpty ? [] : ["Ligner \(lib[0]) i biblioteket. Koble delen til den i CadSHAPE hvis det stemmer – da brukes de eksakte målene derfra."]
-                    if holder { self.notes.append("Holderen regnes ut på PC-en nå – formet etter skannet, og den løftes rett opp.") }
+                    let pc = j["pc"] as? Bool ?? true
+                    if make == "holder" && pc { self.notes.append("Holderen regnes ut på PC-en nå – formet etter skannet, og den løftes rett opp.") }
+                    if make == "cad" && pc { self.notes.append("Delene med mål lages i CadSHAPE nå – endre målene i panelet til høyre.") }
+                    if !pc, let first = (result?["notes"] as? [String])?.first { self.notes.append(first) }
                     UINotificationFeedbackGenerator().notificationOccurred(.success)
                 case .failure(let e):
                     self.error = e.message
@@ -643,8 +652,11 @@ struct CaptureScreen: View {
                 .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
         }
         Text(cap.sizeText).font(.title3.bold()).monospacedDigit()
+        if let s = cap.shapes, !s.parts.isEmpty {
+            ShapesCard(shapes: s)
+        }
         // On the phone Apple builds models at reduced detail: right for holders and pockets, not for tight fits.
-        Label("Formen er nøyaktig til noen millimeter – bra for holdere og lommer. Hull og kanter som skal sitte stramt: mål dem med «Hull».",
+        Label("Nøyaktig til omtrent 1 mm – bra for holdere, lommer og kopier. Hull og kanter som skal sitte stramt: mål dem med «Hull».",
               systemImage: "ruler")
             .font(.footnote).foregroundStyle(warn)
         if let sent = cap.sent {
@@ -658,9 +670,10 @@ struct CaptureScreen: View {
             TextField("Navn", text: $cap.name)
                 .padding(12)
                 .background(Color.white.opacity(0.1), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
-            Picker("Hva lager vi?", selection: $cap.makeHolder) {
-                Text("Holder rundt den").tag(true)
-                Text("Bare modellen").tag(false)
+            Picker("Hva lager vi?", selection: $cap.make) {
+                Text("Deler med mål").tag("cad")
+                Text("Holder rundt").tag("holder")
+                Text("Bare skannet").tag("none")
             }
             .pickerStyle(.segmented)
             if let e = cap.error {
@@ -682,6 +695,73 @@ struct CaptureScreen: View {
             .disabled(cap.sending || cap.api == nil)
             Button("Skann på nytt") { cap.again() }.buttonStyle(SecondaryStyle())
         }
+    }
+}
+
+/// «Finn målene»: what the scan is made of, top first, with a little drawing of the stack.
+struct ShapesCard: View {
+    let shapes: ScanShapes
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 14) {
+            StackDrawing(shapes: shapes)
+                .frame(width: 56, height: 96)
+            VStack(alignment: .leading, spacing: 6) {
+                Text(shapes.parts.count == 1 ? "Fant én del" : "Fant \(shapes.parts.count) deler")
+                    .font(.caption.weight(.semibold)).foregroundStyle(.secondary)
+                ForEach(Array(shapes.lines.enumerated()), id: \.offset) { _, line in
+                    Text(line).font(.subheadline.weight(.semibold)).monospacedDigit()
+                }
+                if shapes.explained < 0.6 {
+                    Text("Mye fri form – CadSHAPE beholder omrisset som profil.")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(12)
+        .background(Color.white.opacity(0.08), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+        .accessibilityElement(children: .combine)
+    }
+}
+
+/// The parts as a side view: each one as wide as it is, stacked to scale.
+struct StackDrawing: View {
+    let shapes: ScanShapes
+
+    var body: some View {
+        Canvas { ctx, size in
+            let widest = shapes.parts.map { p -> Double in
+                switch p.kind {
+                case .cylinder: return p.d
+                case .cone: return max(p.d, p.dTop)
+                case .box: return p.w
+                case .profile: return 0
+                }
+            }.max() ?? 1
+            let scale = min(Double(size.width) / max(widest, 1), Double(size.height) / max(shapes.height, 1))
+            let bottom = shapes.parts.first?.z0 ?? 0
+            let cx = Double(size.width) / 2
+            for (i, p) in shapes.parts.enumerated() {
+                let y0 = Double(size.height) - (p.z0 - bottom) * scale
+                let y1 = Double(size.height) - (p.z1 - bottom) * scale
+                var path = Path()
+                switch p.kind {
+                case .cone:
+                    let b = p.d * scale / 2, t = p.dTop * scale / 2
+                    path.move(to: CGPoint(x: cx - b, y: y0))
+                    path.addLine(to: CGPoint(x: cx + b, y: y0))
+                    path.addLine(to: CGPoint(x: cx + t, y: y1))
+                    path.addLine(to: CGPoint(x: cx - t, y: y1))
+                    path.closeSubpath()
+                default:
+                    let wd = (p.kind == .cylinder ? p.d : p.kind == .box ? p.w : widest * 0.8) * scale
+                    path.addRect(CGRect(x: cx - wd / 2, y: y1, width: wd, height: y0 - y1))
+                }
+                ctx.fill(path, with: .color(i % 2 == 0 ? accent.opacity(0.85) : accent.opacity(0.55)))
+            }
+        }
+        .accessibilityHidden(true)
     }
 }
 
