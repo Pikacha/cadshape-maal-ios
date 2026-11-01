@@ -20,6 +20,7 @@ struct CloseButton: View {
             Image(systemName: icon)
                 .font(.headline)
                 .frame(width: 44, height: 44)
+                .background(Color.black.opacity(0.35), in: Circle())
                 .background(.ultraThinMaterial, in: Circle())
                 .contentShape(Circle())
         }
@@ -168,6 +169,7 @@ struct TopBar: View {
                 }
                 .padding(.horizontal, 12)
                 .frame(minHeight: 44)
+                .background(Color.black.opacity(0.35), in: Capsule())
                 .background(.ultraThinMaterial, in: Capsule())
             }
             .buttonStyle(.plain)
@@ -222,6 +224,8 @@ struct GlassPanel: ViewModifier {
         content
             .padding(16)
             .frame(maxWidth: .infinity, alignment: .leading)
+            // A dark tint under the glass: white text stays readable over a bright white ceiling.
+            .background(Color.black.opacity(0.38), in: RoundedRectangle(cornerRadius: 26, style: .continuous))
             .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 26, style: .continuous))
             .overlay(RoundedRectangle(cornerRadius: 26, style: .continuous).stroke(Color.white.opacity(0.14), lineWidth: 1))
     }
@@ -416,10 +420,12 @@ struct LockedContent: View {
             EdgeChoiceView(model: model)
             HStack(spacing: 8) {
                 if let d = model.shape?.diameter, !nearStandard(d).isEmpty {
-                    Text("Standard:").font(.footnote).opacity(0.75)
+                    Text("Standard mm:").font(.footnote).foregroundStyle(.secondary).fixedSize()
                     ForEach(nearStandard(d), id: \.self) { s in
-                        Button("\(Int(s)) mm") { model.useStandard(s) }
+                        Button("\(Int(s))") { model.useStandard(s) }
                             .buttonStyle(ChipStyle(on: abs(s - d) < 0.01))
+                            .fixedSize()
+                            .accessibilityLabel("\(Int(s)) millimeter")
                     }
                 }
                 Spacer(minLength: 0)
@@ -701,7 +707,7 @@ struct PairingCard: View {
         VStack(spacing: 10) {
             Image(systemName: "qrcode.viewfinder").font(.system(size: 36)).foregroundStyle(accent)
             Text("Koble til CadSHAPE").font(.title3.bold())
-            Text("På PC-en: start CadSHAPE med START_CADSHAPE_MOBIL.bat, så Fil → «Mål med telefonen». Sikt kameraet på QR-koden. Eller logg inn på CadSHAPE på nett under innstillinger.")
+            Text("Sikt på QR-koden i CadSHAPE på PC-en (Fil → «Mål med telefonen»). Eller logg inn på nett.")
                 .font(.subheadline)
                 .multilineTextAlignment(.center)
                 .opacity(0.8)

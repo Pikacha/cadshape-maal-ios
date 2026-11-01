@@ -166,7 +166,7 @@ struct HomeView: View {
                 }
             }
             HStack(spacing: 10) {
-                Button { model.showConnect = true } label: { Label("Logg inn på nett", systemImage: "globe") }
+                Button { model.showConnect = true } label: { Label("Logg inn", systemImage: "globe").lineLimit(1) }
                     .buttonStyle(PrimaryStyle())
                 Button {
                     model.wantsPairing = true

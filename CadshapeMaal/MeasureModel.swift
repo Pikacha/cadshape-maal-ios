@@ -403,7 +403,17 @@ final class MeasureModel: ObservableObject {
     /// «± 0,3 mm» (nil before there is a steady measurement).
     var uncertaintyText: String? { controlDiameterMM == nil ? uncertainty.map { "Anslått avvik: ± \(mm($0)) mm" } : nil }
     /// The measurement is too unsure to rely on for a tight fit.
-    var unsure: Bool { controlDiameterMM == nil && (uncertainty ?? .infinity) > 0.5 }
+    /// Same limit as automatic locking: 1,5 % of the size, at least 0,5 mm (±0,7 on a 68 mm hole is fine).
+    var unsure: Bool {
+        guard controlDiameterMM == nil else { return false }
+        let size = live.map { max($0.widthMM, $0.heightMM) } ?? (lockedOutline.isEmpty ? 0 : outlineSize(lockedOutline))
+        return (uncertainty ?? .infinity) > max(0.5, size * 0.015)
+    }
+
+    private func outlineSize(_ pts: [P2]) -> Double {
+        let xs = pts.map(\.x), ys = pts.map(\.y)
+        return max((xs.max() ?? 0) - (xs.min() ?? 0), (ys.max() ?? 0) - (ys.min() ?? 0))
+    }
 
     /// User-initiated sharing of numeric measurement evidence; no photo or connection details.
     var diagnosticsText: String? {
