@@ -150,26 +150,45 @@ struct ShapeDrawing: View {
     }
 }
 
-/// One row per part, top first: name, measure and a dot that says how well the shape fits the scan.
+/// One row per part, top first: name, measures with ± and a dot that says how well the shape fits
+/// the scan. A tap on a row opens «Rett etter skyvelære» for that part.
 struct PartRows: View {
     let shapes: ScanShapes
+    var scale: ScaleSource = .tracking
+    var onTap: ((Int) -> Void)? = nil
 
     var body: some View {
         VStack(spacing: 8) {
-            ForEach(Array(shapes.parts.enumerated().reversed()), id: \.offset) { _, p in
-                HStack(spacing: 12) {
-                    Circle().fill(p.spread < 0.5 ? good : (p.spread < 1.5 ? warn : bad)).frame(width: 10, height: 10)
-                    Text(name(p)).font(.subheadline.weight(.semibold))
-                    Spacer(minLength: 8)
-                    Text("\(widthText(p)) × \(shortMM(p.height))").font(.subheadline).monospacedDigit()
+            ForEach(Array(shapes.parts.enumerated().reversed()), id: \.offset) { i, p in
+                Button {
+                    onTap?(i)
+                } label: {
+                    HStack(spacing: 12) {
+                        Circle().fill(p.spread < 0.5 ? good : (p.spread < 1.5 ? warn : bad)).frame(width: 10, height: 10)
+                        Text(name(p)).font(.subheadline.weight(.semibold))
+                        Spacer(minLength: 8)
+                        VStack(alignment: .trailing, spacing: 2) {
+                            Text("\(widthText(p)) × \(shortMM(p.height))").font(.subheadline).monospacedDigit()
+                            Text(plusMinusText(p.plusMinus(p.measures[0], scale: scale)) + " mm")
+                                .font(.caption).monospacedDigit().foregroundStyle(.secondary)
+                        }
+                        if onTap != nil {
+                            Image(systemName: "chevron.right").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
+                        }
+                    }
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 12)
+                    .background(Color.white.opacity(0.08), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
                 }
-                .padding(.horizontal, 14)
-                .padding(.vertical, 12)
-                .background(Color.white.opacity(0.08), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+                .buttonStyle(.plain)
+                .disabled(onTap == nil)
                 .accessibilityElement(children: .combine)
                 .accessibilityValue(p.spread < 0.5 ? "følger skannet" : "usikker")
+                .accessibilityHint(onTap == nil ? "" : "Rett størrelsen etter skyvelæren")
             }
-            Text("Grønn: formen følger skannet innen 0,5 mm. Gul/rød: mål det kritiske med skyvelære.")
+            Text(scale == .measured
+                 ? "Størrelsen er rettet etter skyvelæren. ± er det målene fortsatt kan bomme."
+                 : "Telefonen kan bomme 1–2 % på størrelsen. Mål ett langt mål med skyvelære og trykk på delen for å rette alle målene.")
                 .font(.caption).foregroundStyle(.secondary).frame(maxWidth: .infinity, alignment: .leading)
         }
     }
@@ -182,4 +201,95 @@ struct PartRows: View {
         case .profile: return "Fri form"
         }
     }
+}
+
+/// «Rett etter skyvelære»: one measure from the calipers scales the whole scan.
+struct CaliperSheet: View {
+    let shapes: ScanShapes
+    let start: Int
+    let apply: (Int, PartMeasure, Double, Bool) -> String?
+    @Environment(\.dismiss) private var dismiss
+    @State private var part = 0
+    @State private var measure: PartMeasure = .diameter
+    @State private var text = ""
+    @State private var learn = true
+    @State private var error: String?
+    @FocusState private var focused: Bool
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                if shapes.parts.count > 1 {
+                    Picker("Del", selection: $part) {
+                        ForEach(Array(shapes.parts.enumerated().reversed()), id: \.offset) { i, p in
+                            Text("\(i + 1). \(p.text)").tag(i)
+                        }
+                    }
+                }
+                let p = shapes.parts[min(part, shapes.parts.count - 1)]
+                Picker("Mål", selection: $measure) {
+                    ForEach(p.measures) { Text($0.label).tag($0) }
+                }
+                .pickerStyle(.segmented)
+                Section {
+                    LabeledContent("Skannet viser", value: "\(shortMM(p.value(measure))) mm")
+                    HStack {
+                        Text("Skyvelæren viser")
+                        TextField("mm", text: $text)
+                            .keyboardType(.decimalPad)
+                            .multilineTextAlignment(.trailing)
+                            .focused($focused)
+                        Text("mm").foregroundStyle(.secondary)
+                    }
+                } footer: {
+                    Text("Ta det lengste målet du kan måle sikkert – da blir resten mest nøyaktig. Alle de andre målene følger med.")
+                }
+                Section {
+                    Toggle("Lær telefonen av dette", isOn: $learn)
+                } footer: {
+                    Text("Telefonen husker hvor mye den bommet, og retter neste skann av seg selv (etter to rettinger).")
+                }
+                if let error {
+                    Text(error).foregroundStyle(bad)
+                }
+            }
+            .navigationTitle("Rett etter skyvelære")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) { Button("Avbryt") { dismiss() } }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Bruk") {
+                        guard let v = Double(text.replacingOccurrences(of: ",", with: ".")), v > 0 else {
+                            error = "Skriv målet i millimeter, for eksempel 37,4."
+                            return
+                        }
+                        if let e = apply(part, measure, v, learn) { error = e } else { dismiss() }
+                    }
+                    .disabled(text.isEmpty)
+                }
+            }
+            .onAppear {
+                part = min(max(start, 0), shapes.parts.count - 1)
+                measure = shapes.parts[part].measures[0]
+                focused = true
+            }
+            .onChange(of: part) { _, new in
+                let ms = shapes.parts[new].measures
+                if !ms.contains(measure) { measure = ms[0] }
+            }
+        }
+    }
+}
+
+/// This phone's learnt size bias (UserDefaults, the phone only – never sent anywhere).
+enum PhoneScaleStore {
+    private static let key = "phoneScale"
+    static func load() -> PhoneScale {
+        guard let d = UserDefaults.standard.data(forKey: key), let v = try? JSONDecoder().decode(PhoneScale.self, from: d) else { return PhoneScale() }
+        return v
+    }
+    static func save(_ v: PhoneScale) {
+        if let d = try? JSONEncoder().encode(v) { UserDefaults.standard.set(d, forKey: key) }
+    }
+    static func reset() { UserDefaults.standard.removeObject(forKey: key) }
 }

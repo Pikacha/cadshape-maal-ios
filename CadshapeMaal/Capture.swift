@@ -33,8 +33,17 @@ final class CaptureModel: ObservableObject {
     /// What CadSHAPE makes when the scan arrives: «cad» (parts with measures you can change),
     /// «holder» (a holder shaped after the scan) or «none» (just the scan as a reference).
     @Published var make = "cad"
-    /// «Finn målene»: the scan as cylinders, cones, boxes and outlines with measures (HoleKit ScanShapes).
+    /// «Finn målene»: the scan as cylinders, cones, boxes and outlines with measures (HoleKit ScanShapes),
+    /// at the current scale (`factor` × what Object Capture made).
     @Published var shapes: ScanShapes?
+    /// Where the size comes from: the phone's tracking (1–2 % off), its calibration, or the calipers.
+    @Published var scaleSource: ScaleSource = .tracking
+    /// The measure the calipers gave, for the line under the drawing («Ø37,4 fra skyvelæren»).
+    @Published var caliperNote: String?
+    /// What Object Capture made, before any scale correction.
+    private var rawMesh: TriangleMesh?
+    private var rawShapes: ScanShapes?
+    private(set) var factor: Double = 1
     @Published var sent: String?
     @Published var notes: [String] = []
     @Published var error: String? { didSet { if let e = error { applog("3D-skann feil", e) } } }
@@ -250,6 +259,11 @@ final class CaptureModel: ObservableObject {
         cancel()
         mesh = nil
         shapes = nil
+        rawMesh = nil
+        rawShapes = nil
+        factor = 1
+        scaleSource = .tracking
+        caliperNote = nil
         modelURL = nil
         sent = nil
         notes = []
@@ -327,12 +341,51 @@ final class CaptureModel: ObservableObject {
             return z
         }.value
         guard let cad else { step = .failed("Modellen var tom. Prøv igjen med tingen midt i bildet."); return }
-        mesh = cad
+        rawMesh = cad
         modelURL = url
-        shapes = await Task.detached(priority: .userInitiated) { fitScanShapes(cad) }.value
-        if let s = shapes { applog("Finn målene", s.lines.joined(separator: " · ")) }
+        rawShapes = await Task.detached(priority: .userInitiated) { fitScanShapes(cad) }.value
+        // This phone's own size bias, learnt from earlier caliper corrections.
+        if let f = PhoneScaleStore.load().factor {
+            applyScale(f, source: .phone)
+        } else {
+            applyScale(1, source: .tracking)
+        }
+        if let s = shapes { applog("Finn målene", s.lines.joined(separator: " · ") + " (\(scaleSource.rawValue), ×\(String(format: "%.4f", factor)))") }
         step = .done
         UINotificationFeedbackGenerator().notificationOccurred(.success)
+    }
+
+    private func applyScale(_ f: Double, source: ScaleSource) {
+        factor = f
+        scaleSource = source
+        mesh = rawMesh.map { m in f == 1 ? m : m.mapped { $0 * f } }
+        shapes = rawShapes?.scaled(by: f)
+    }
+
+    /// «Rett etter skyvelære»: `truth` is what the calipers show for `measure` on part `index`.
+    /// Every measure follows. With `learn`, the phone keeps the factor for the next scans.
+    /// Returns an error text when the number can't be that measure.
+    func correct(part index: Int, measure: PartMeasure, truth: Double, learn: Bool) -> String? {
+        guard let raw = rawShapes, raw.parts.indices.contains(index) else { return "Fant ikke delen." }
+        let rawValue = raw.parts[index].value(measure)
+        guard let f = scaleFactor(measured: rawValue, truth: truth) else {
+            return "\(shortMM(truth)) mm passer ikke med skannet (\(shortMM(rawValue * factor)) mm). Sjekk at det er samme mål."
+        }
+        applyScale(f, source: .measured)
+        caliperNote = "\(measure.label) \(shortMM(truth)) mm fra skyvelæren"
+        if learn {
+            var ph = PhoneScaleStore.load()
+            ph.add(f)
+            PhoneScaleStore.save(ph)
+        }
+        applog("Skyvelære", "\(measure.rawValue) \(truth) mot \(rawValue) → ×\(String(format: "%.4f", f))")
+        return nil
+    }
+
+    /// Back to the size before the calipers (the phone's calibration if it has one).
+    func undoCorrection() {
+        caliperNote = nil
+        if let f = PhoneScaleStore.load().factor { applyScale(f, source: .phone) } else { applyScale(1, source: .tracking) }
     }
 
     var sizeText: String {
@@ -347,12 +400,13 @@ final class CaptureModel: ObservableObject {
         let s = mesh.size
         let name = self.name.trimmingCharacters(in: .whitespaces).isEmpty ? "Skann" : self.name
         let make = self.make
+        let scaleLine = scaleSource.label + (caliperNote.map { " (\($0))." } ?? ".")
         Task { [weak self] in
             let stl = await Task.detached { binarySTL(mesh, header: "CadSHAPE Maal - Object Capture").base64EncodedString() }.value
             let body: [String: Any] = [
                 "type": "mesh", "role": "ting", "name": name, "stl": stl, "make": make,
                 "size": [s.x, s.y, s.z].map { ($0 * 10).rounded() / 10 },
-                "notes": ["3D-skann fra telefonen (Object Capture, \(mesh.triangleCount) trekanter). Mål kritiske hull med Hull-modus."],
+                "notes": ["3D-skann fra telefonen (Object Capture, \(mesh.triangleCount) trekanter). \(scaleLine)"],
             ]
             api.postJSON("api/live/scan", body: body, timeout: 240) { r in
                 guard let self else { return }
@@ -427,6 +481,12 @@ struct ModelPreview: UIViewRepresentable {
     func updateUIView(_ uiView: SCNView, context: Context) {}
 }
 
+/// Which part the caliper sheet opens on.
+struct CaliperPick: Identifiable {
+    let index: Int
+    var id: Int { index }
+}
+
 struct CaptureScreen: View {
     @StateObject private var cap: CaptureModel
     @ObservedObject private var model: MeasureModel
@@ -434,6 +494,7 @@ struct CaptureScreen: View {
     @State private var connect = false
     @State private var drawSide: DrawingSide = .side
     @State private var showModel = false
+    @State private var caliperPart: Int?
     let close: () -> Void
 
     init(model: MeasureModel, close: @escaping () -> Void) {
@@ -690,8 +751,17 @@ struct CaptureScreen: View {
                             .frame(minHeight: 44)
                     }
                 }
+                if let note = cap.caliperNote {
+                    HStack {
+                        Label(note, systemImage: "ruler").font(.subheadline)
+                        Spacer()
+                        Button("Angre") { cap.undoCorrection() }.font(.subheadline.weight(.semibold)).frame(minHeight: 44)
+                    }
+                } else if cap.scaleSource == .phone {
+                    Label(cap.scaleSource.label, systemImage: "iphone").font(.subheadline).foregroundStyle(.secondary)
+                }
                 if let s = cap.shapes, !s.parts.isEmpty {
-                    PartRows(shapes: s)
+                    PartRows(shapes: s, scale: cap.scaleSource, onTap: cap.sent == nil ? { caliperPart = $0 } : nil)
                 } else {
                     Text("Fant ingen enkle former – CadSHAPE får skannet som det er, og du kan lage en holder rundt det.")
                         .font(.subheadline).foregroundStyle(.secondary)
@@ -701,13 +771,23 @@ struct CaptureScreen: View {
             .padding(16)
         }
         .background(ground.ignoresSafeArea())
+        .sheet(item: Binding(get: { caliperPart.map { CaliperPick(index: $0) } }, set: { caliperPart = $0?.index })) { pick in
+            if let s = cap.shapes {
+                CaliperSheet(shapes: s, start: pick.index) { i, m, v, learn in
+                    cap.correct(part: i, measure: m, truth: v, learn: learn)
+                }
+                .presentationDetents([.medium, .large])
+            }
+        }
     }
 
     @ViewBuilder private var done: some View {
-        // On the phone Apple builds models at reduced detail: right for holders and pockets, not for tight fits.
-        Label("Nøyaktig til omtrent 1 mm – bra for holdere, lommer og kopier. Hull og kanter som skal sitte stramt: mål dem med «Hull».",
-              systemImage: "ruler")
-            .font(.footnote).foregroundStyle(warn)
+        // On the phone Apple builds models at reduced detail; the size is the phone's tracking until corrected.
+        if cap.scaleSource != .measured {
+            Label("Hull og kanter som skal sitte stramt: rett størrelsen etter skyvelæren først, eller mål dem med «Hull».",
+                  systemImage: "ruler")
+                .font(.footnote).foregroundStyle(warn)
+        }
         if let sent = cap.sent {
             Label(sent, systemImage: "checkmark.circle.fill").foregroundStyle(good).font(.headline)
             ForEach(cap.notes, id: \.self) { n in

@@ -781,6 +781,7 @@ struct SettingsSheet: View {
                 if onScanQR == nil {
                     CalibrationSection(model: model)
                 }
+                PhoneScaleSection()
                 Section {
                     Toggle("Lås av seg selv når målet er stødig", isOn: $model.autoLock)
                 } header: {
@@ -888,5 +889,33 @@ struct RoundStyle: ButtonStyle {
             .foregroundStyle(Color.white)
             .frame(width: 44, height: 44)
             .contentShape(Circle())
+    }
+}
+
+/// «Størrelse i 3D-skann»: what the phone has learnt from caliper corrections, and a way to forget it.
+struct PhoneScaleSection: View {
+    @State private var scale = PhoneScaleStore.load()
+
+    var body: some View {
+        Section {
+            if let f = scale.factor {
+                LabeledContent("Retting", value: String(format: "%+.1f %%", (f - 1) * 100).replacingOccurrences(of: ".", with: ","))
+                LabeledContent("Fra", value: "\(scale.samples.count) rettinger med skyvelære")
+                if let sp = scale.spread {
+                    LabeledContent("Sprik", value: String(format: "%.1f %%", sp * 100).replacingOccurrences(of: ".", with: ","))
+                }
+                Button("Glem rettingen", role: .destructive) {
+                    PhoneScaleStore.reset()
+                    scale = PhoneScaleStore.load()
+                }
+            } else {
+                Text(scale.samples.count == 1 ? "Én retting så langt – trenger to." : "Ingen rettinger ennå.")
+                    .foregroundStyle(.secondary)
+            }
+        } header: {
+            Text("Størrelse i 3D-skann")
+        } footer: {
+            Text("Når du retter et skann etter skyvelæren, lærer telefonen hvor mye den bommer, og retter neste skann av seg selv. Lite sprik betyr at rettingen holder.")
+        }
     }
 }
