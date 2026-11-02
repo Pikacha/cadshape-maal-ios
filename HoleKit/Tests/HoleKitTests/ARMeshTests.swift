@@ -1,7 +1,7 @@
 import XCTest
 @testable import HoleKit
 
-/// STL to and from CadSHAPE, Y up ↔ Z up, a piece of the room's mesh, and the AR clearance check.
+/// STL to and from CadSHAPE, Y up ↔ Z up, and the AR clearance check.
 final class ARMeshTests: XCTestCase {
     /// A 20 × 10 × 5 mm box, Z up, from 0.
     private func box() -> TriangleMesh {
@@ -36,20 +36,6 @@ final class ARMeshTests: XCTestCase {
         XCTAssertEqual(w.x, 0.005, accuracy: 1e-12)
         XCTAssertEqual(w.y, 0.01, accuracy: 1e-12)
         XCTAssertEqual(w.z, -0.02, accuracy: 1e-12)
-    }
-
-    func testCropKeepsOnlyTrianglesNearTheCentre() {
-        var v: [V3] = []
-        var f: [UInt32] = []
-        for k in 0..<10 {
-            let x = Double(k) * 0.1
-            let b = UInt32(v.count)
-            v += [V3(x, 0, 0), V3(x + 0.01, 0, 0), V3(x, 0.01, 0)]
-            f += [b, b + 1, b + 2]
-        }
-        let piece = crop(TriangleMesh(vertices: v, faces: f), centre: V3(0, 0, 0), radius: 0.25)
-        XCTAssertEqual(piece.triangleCount, 3)
-        XCTAssertEqual(piece.vertices.count, 9)
     }
 
     /// A wall 1 m in front of a camera at the origin looking along −Z (ARKit), flat LiDAR depth.
@@ -96,11 +82,5 @@ final class ARMeshTests: XCTestCase {
         let r = depthClearance([V3(0, 0, 0.5), V3(5, 0, -1)], depth: dm, intrinsics: K, imageWidth: 640, imageHeight: 480, pose: pose)
         XCTAssertEqual(r.checked, 0)
         XCTAssertNil(r.gapMM)
-    }
-
-    func testCornerAngle() {
-        XCTAssertEqual(cornerAngle(V3(0, 0, 1), V3(0, 1, 0)), 90, accuracy: 1e-9)
-        XCTAssertEqual(cornerAngle(V3(0, 1, 0), V3(0, 1, 0)), 180, accuracy: 1e-9)
-        XCTAssertEqual(cornerAngle(V3(0, 1, 0), V3(0, -1, 0)), 0, accuracy: 1e-6)
     }
 }

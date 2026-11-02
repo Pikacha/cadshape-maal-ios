@@ -5,7 +5,7 @@ import UserNotifications
 
 /// The screens under «Hjem». Each has the camera to itself (one AR session at a time).
 enum Screen: String, Identifiable {
-    case measure, capture, part, place
+    case measure, capture, part
     var id: String { rawValue }
 }
 
@@ -16,40 +16,30 @@ struct RootView: View {
     @Environment(\.scenePhase) private var phase
 
     var body: some View {
-        Group {
-            if model.isDemo && model.demo != "home" {
-                ContentView(model: model)
-            } else if model.isDemo {
-                // `-demo home`: the home screen for screenshots (no PC, no printer).
-                HomeView(model: model, watch: watch) { _ in }
-            } else {
-                HomeView(model: model, watch: watch) { screen = $0 }
-                    .fullScreenCover(item: $screen) { s in
-                        switch s {
-                        case .measure: ContentView(model: model) { screen = nil }
-                        case .capture: CaptureScreen(model: model) { screen = nil }
-                        case .part: PartARScreen(model: model, watch: watch) { screen = nil }
-                        case .place: PlaceScreen(model: model) { screen = nil }
-                        }
-                    }
-                    .sheet(isPresented: $watch.showCard) { ApprovalSheet(watch: watch) }
+        HomeView(model: model, watch: watch) { screen = $0 }
+            .fullScreenCover(item: $screen) { s in
+                switch s {
+                case .measure: ContentView(model: model) { screen = nil }
+                case .capture: CaptureScreen(model: model) { screen = nil }
+                case .part: PartARScreen(model: model, watch: watch) { screen = nil }
+                }
             }
-        }
-        .preferredColorScheme(.dark)
-        .onAppear {
-            watch.model = model
-            watch.start()
-        }
-        // Only ask the PC while the app is on screen.
-        .onChange(of: phase) { _, p in
-            if p == .active {
-                model.startChecking()
+            .sheet(isPresented: $watch.showCard) { ApprovalSheet(watch: watch) }
+            .preferredColorScheme(.dark)
+            .onAppear {
+                watch.model = model
                 watch.start()
-            } else {
-                model.stopChecking()
-                watch.stop()
             }
-        }
+            // Only ask the PC while the app is on screen.
+            .onChange(of: phase) { _, p in
+                if p == .active {
+                    model.startChecking()
+                    watch.start()
+                } else {
+                    model.stopChecking()
+                    watch.stop()
+                }
+            }
     }
 }
 
@@ -81,15 +71,15 @@ struct HomeView: View {
                 } else if model.pcOpen != true && model.connectionError != nil {
                     offlineRow
                 }
-                Text("Hva vil du lage?")
+                Text("Hva skal måles?")
                     .font(.system(.largeTitle, design: .rounded).weight(.bold))
                     .padding(.top, 4)
                 bigTile
                 HStack(spacing: 12) {
-                    tile("Skann stedet", "Pek der delen skal sitte", "house", blueTint) { open(.place) }
-                    tile("Se delen i AR", watch.lastPartLabel ?? "Ekte størrelse, før print", "cube.transparent", accent) { open(.part) }
+                    tile("Hull", "Diameter og avstand, rett ovenfra", "circle.dashed", accent) { measure(.single) }
+                    tile("Inni boks", "Mål innsiden, lag skillevegger", "shippingbox", blueTint) { measure(.box) }
                 }
-                quickMeasure
+                arTile
                 if let p = watch.printer, p.online {
                     PrinterRow(printer: p)
                 }
@@ -117,6 +107,13 @@ struct HomeView: View {
     }
 
     @State private var scanQR = false
+
+    /// The camera screen, straight in the chosen mode (no mode picker there).
+    private func measure(_ mode: MeasureMode) {
+        model.wantsPairing = false
+        model.mode = mode
+        open(.measure)
+    }
 
     private var header: some View {
         HStack {
@@ -201,8 +198,8 @@ struct HomeView: View {
             VStack(alignment: .leading, spacing: 6) {
                 Image(systemName: "viewfinder").font(.system(size: 30, weight: .semibold))
                 Spacer(minLength: 24)
-                Text("Skann en ting").font(.title2.bold())
-                Text("Gå rundt den. Få hele modellen med alle mål – som deler du kan endre i CadSHAPE.")
+                Text("Skann ting").font(.title2.bold())
+                Text("Gå rundt tingen. Du får formen med alle mål – sylindre, klosser og profiler du kan endre.")
                     .font(.subheadline)
                     .multilineTextAlignment(.leading)
                     .opacity(0.85)
@@ -232,28 +229,25 @@ struct HomeView: View {
         .buttonStyle(.plain)
     }
 
-    private var quickMeasure: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Text("Mål med kamera").font(.subheadline.weight(.semibold)).foregroundStyle(muted)
-            // All modes visible at once (a scrolling row hid the last ones).
-            LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 8), count: 3), spacing: 8) {
-                ForEach(MeasureMode.allCases) { m in
-                    Button {
-                        model.mode = m
-                        open(.measure)
-                    } label: {
-                        VStack(spacing: 6) {
-                            Image(systemName: m.symbol).font(.title3.weight(.semibold)).foregroundStyle(accent)
-                            Text(m.short).font(.footnote.weight(.semibold)).lineLimit(1).minimumScaleFactor(0.8)
-                        }
-                        .frame(maxWidth: .infinity, minHeight: 64)
-                        .background(panel, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
-                        .overlay(RoundedRectangle(cornerRadius: 16, style: .continuous).stroke(Color.white.opacity(0.08), lineWidth: 1))
-                    }
-                    .buttonStyle(.plain)
+    /// Smaller than the measuring tiles: see a part from CadSHAPE in the room, in its real size.
+    private var arTile: some View {
+        Button { open(.part) } label: {
+            HStack(spacing: 12) {
+                Image(systemName: "cube.transparent").font(.title2.weight(.semibold)).foregroundStyle(accent)
+                    .frame(width: 32)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Se delen i AR").font(.headline)
+                    Text(watch.lastPartLabel ?? "Ekte størrelse, før print").font(.subheadline).foregroundStyle(muted).lineLimit(1)
                 }
+                Spacer(minLength: 8)
+                Image(systemName: "chevron.right").font(.footnote.weight(.bold)).foregroundStyle(muted)
             }
+            .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
+            .padding(16)
+            .background(panel, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
+            .overlay(RoundedRectangle(cornerRadius: 20, style: .continuous).stroke(Color.white.opacity(0.08), lineWidth: 1))
         }
+        .buttonStyle(.plain)
     }
 
     private func approvalBanner(_ card: ApprovalCard) -> some View {

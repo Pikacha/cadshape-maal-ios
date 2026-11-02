@@ -102,29 +102,6 @@ public func parseBinarySTL(_ data: Data) -> TriangleMesh? {
     return TriangleMesh(vertices: vertices, faces: faces)
 }
 
-/// The triangles of `mesh` with their middle within `radius` of `centre` (a piece of the room).
-public func crop(_ mesh: TriangleMesh, centre: V3, radius: Double) -> TriangleMesh {
-    var map: [UInt32: UInt32] = [:]
-    var vertices: [V3] = []
-    var faces: [UInt32] = []
-    var i = 0
-    while i + 2 < mesh.faces.count {
-        let idx = [mesh.faces[i], mesh.faces[i + 1], mesh.faces[i + 2]]
-        i += 3
-        guard idx.allSatisfy({ Int($0) < mesh.vertices.count }) else { continue }
-        let mid = (mesh.vertices[Int(idx[0])] + mesh.vertices[Int(idx[1])] + mesh.vertices[Int(idx[2])]) / 3
-        if vlength(mid - centre) > radius { continue }
-        for k in idx {
-            if let m = map[k] { faces.append(m); continue }
-            let m = UInt32(vertices.count)
-            map[k] = m
-            vertices.append(mesh.vertices[Int(k)])
-            faces.append(m)
-        }
-    }
-    return TriangleMesh(vertices: vertices, faces: faces)
-}
-
 /// At most `count` corners spread over the mesh (for checks every frame).
 public func sampleVertices(_ mesh: TriangleMesh, count: Int) -> [V3] {
     if mesh.vertices.count <= count { return mesh.vertices }

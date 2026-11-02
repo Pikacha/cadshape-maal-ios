@@ -236,24 +236,7 @@ final class CadshapeClient: NSObject, URLSessionDelegate {
         }
     }
 
-    /// A pattern of holes: CadSHAPE makes a plate with them, or the holes alone.
-    func holes(_ holes: [PatternHoleOut], make: HolesMake, params: [ParamKey: Double], photo: String?, done: @escaping (Result<String, ClientError>) -> Void) {
-        var body: [String: Any] = [
-            "type": "holes",
-            "holes": holes.compactMap { h -> [String: Any]? in
-                guard let data = try? JSONEncoder().encode(h.shape), let shape = try? JSONSerialization.jsonObject(with: data) else { return nil }
-                return ["x": round4(h.x), "y": round4(h.y), "shape": shape]
-            },
-            "make": make.rawValue,
-            "params": paramsJSON(params),
-        ]
-        if let photo { body["photo"] = photo }
-        call(request("api/live/scan", body: try? JSONSerialization.data(withJSONObject: body))) { r in
-            done(r.map { json in (json["result"] as? [String: Any])?["label"] as? String ?? "Hullmønsteret" })
-        }
-    }
-
-    /// The inside of a box or something on a table (LiDAR): CadSHAPE makes the parts. Gives their
+    /// The inside of a box (LiDAR): CadSHAPE makes the parts. Gives their
     /// description and short notes (split for the plate, what fits …).
     func space(_ body: [String: Any], photo: String?, done: @escaping (Result<(label: String, notes: [String]), ClientError>) -> Void) {
         var body = body

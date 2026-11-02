@@ -3,14 +3,6 @@ import HoleKit
 import Security
 import UIKit
 
-/// One hole of a pattern, as it will be sent: position on the surface (mm, x right, y up as seen
-/// from the room) and its shape.
-struct PatternHoleOut: Codable, Equatable {
-    var x: Double
-    var y: Double
-    var shape: MeasuredShape
-}
-
 /// The inside of a box, as sent (mm). Height 0 = not measured.
 struct BoxOut: Codable, Equatable {
     var width: Double
@@ -25,36 +17,6 @@ struct BoxOut: Codable, Equatable {
     }
 }
 
-/// Something on a table: its footprint seen from above (mm, x right, y away, centred) and height.
-struct ObjectOut: Codable, Equatable {
-    var outline: [[Double]]
-    var width: Double
-    var length: Double
-    var height: Double
-
-    var json: [String: Any] { ["outline": outline, "width": width, "length": length, "height": height] }
-}
-
-/// A pipe, rod or hose (outside diameter, mm), and a second one for an adapter.
-struct PipeOut: Codable, Equatable {
-    var diameter: Double
-    var second: Double?
-
-    var json: [String: Any] {
-        var out: [String: Any] = ["diameter": diameter]
-        if let second { out["second"] = second }
-        return out
-    }
-}
-
-/// The gap between two surfaces (mm) and the angle between them (degrees).
-struct GapOut: Codable, Equatable {
-    var gap: Double
-    var angle: Double
-
-    var json: [String: Any] { ["gap": gap, "angle": angle] }
-}
-
 /// A measurement kept on the phone: made from it, or waiting to be sent when CadSHAPE is open.
 struct SavedMeasurement: Codable, Identifiable, Equatable {
     var id = UUID()
@@ -63,21 +25,11 @@ struct SavedMeasurement: Codable, Identifiable, Equatable {
     var shape: MeasuredShape?
     var make: MakeKind?
     var params: [String: Double]?
-    /// … or a pattern of holes.
-    var holes: [PatternHoleOut]?
-    var holesMake: HolesMake?
-    var holesParams: [String: Double]?
-    /// … or the inside of a box, or something on a table (with what to make and its settings).
+    /// … or the inside of a box (with what to make and its settings).
+    /// Older app versions also saved hole patterns, outlines, pipes and gaps: their keys are
+    /// ignored when decoding, and such entries are dropped on load (`isUsable`).
     var box: BoxOut?
     var boxMake: BoxMake?
-    var object: ObjectOut?
-    /// More things for the same tray (the first is `object`).
-    var objects: [ObjectOut]?
-    var objectMake: ObjectMake?
-    var pipe: PipeOut?
-    var pipeMake: PipeMake?
-    var gap: GapOut?
-    var gapMake: GapMake?
     var spaceParams: [String: Double]?
     var text: String
     /// ± mm, how sure the measurement is.
@@ -91,24 +43,16 @@ struct SavedMeasurement: Codable, Identifiable, Equatable {
     /// Made in CadSHAPE (and when).
     var sentAt: Date?
 
-    var isPattern: Bool { holes != nil }
+    /// A hole or a box: what this app can still send. A measurement of a kind that was removed
+    /// (hole pattern, outline, pipe, gap) decodes with neither.
+    var isUsable: Bool { shape != nil || box != nil }
 
     /// A picture for the list when there is no photo.
-    var symbol: String {
-        if box != nil { return "shippingbox" }
-        if object != nil { return "wrench.and.screwdriver" }
-        if pipe != nil { return "cylinder" }
-        if gap != nil { return "arrow.up.and.down.square" }
-        return isPattern ? "circle.grid.2x2" : "circle.dashed"
-    }
+    var symbol: String { box != nil ? "shippingbox" : "circle.dashed" }
 
     /// What is made from it, for the list.
     var makeLabel: String? {
         if let m = boxMake, box != nil { return m.label }
-        if let m = objectMake, object != nil { return m.label }
-        if let m = pipeMake, pipe != nil { return m.label }
-        if let m = gapMake, gap != nil { return m.label }
-        if let m = holesMake, isPattern { return m.label }
         return make?.label
     }
 }
@@ -126,7 +70,13 @@ final class MeasurementStore: ObservableObject {
         dir = docs.appendingPathComponent("maalinger", isDirectory: true)
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         if let data = try? Data(contentsOf: file), let list = try? JSONDecoder().decode([SavedMeasurement].self, from: data) {
-            items = list
+            // Kinds this app no longer measures cannot be sent: drop them (and their pictures).
+            let gone = list.filter { !$0.isUsable }
+            items = list.filter(\.isUsable)
+            if !gone.isEmpty {
+                for m in gone { if let url = photoURL(m) { try? FileManager.default.removeItem(at: url) } }
+                save()
+            }
         }
     }
 

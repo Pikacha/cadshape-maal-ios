@@ -51,6 +51,9 @@ final class ScanShapesTests: XCTestCase {
         XCTAssertEqual(s.parts[0].height, 59, accuracy: 2)
         XCTAssertEqual(s.parts[1].height, 17.3, accuracy: 1.5)
         XCTAssertTrue(s.lines[0].hasPrefix("Sylinder Ø38"), s.lines[0])
+        // The slices agree with the measures: green in the app.
+        XCTAssertLessThan(s.parts[0].spread, 0.5)
+        XCTAssertLessThan(s.parts[1].spread, 0.5)
     }
 
     func testHeavierNoiseStillTwoParts() throws {

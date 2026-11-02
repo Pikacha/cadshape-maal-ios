@@ -64,10 +64,3 @@ public func depthClearance(_ points: [V3], depth dm: DepthMap, intrinsics K: Int
     let marks = hits.sorted { $0.1 > $1.1 }.prefix(maxHits).map { $0.0 }
     return Clearance(gapMM: gap.map { $0 * 1000 }, hitMM: deepest * 1000, hits: Array(marks), checked: checked)
 }
-
-/// The angle between two surfaces from their normals, as one sees it in a corner: 90° for a wall and
-/// a shelf, 180° for one flat surface, 0° for two facing each other.
-public func cornerAngle(_ a: V3, _ b: V3) -> Double {
-    let c = max(-1, min(1, vdot(vnormalized(a), vnormalized(b))))
-    return 180 - acos(c) * 180 / .pi
-}

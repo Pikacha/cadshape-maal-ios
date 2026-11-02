@@ -432,6 +432,8 @@ struct CaptureScreen: View {
     @ObservedObject private var model: MeasureModel
     @State private var confirmClose = false
     @State private var connect = false
+    @State private var drawSide: DrawingSide = .side
+    @State private var showModel = false
     let close: () -> Void
 
     init(model: MeasureModel, close: @escaping () -> Void) {
@@ -452,6 +454,9 @@ struct CaptureScreen: View {
             } else {
                 ground.ignoresSafeArea()
             }
+            if cap.step == .done {
+                result
+            } else {
             VStack(spacing: 10) {
                 HStack(alignment: .top) {
                     CloseButton(label: "Avbryt skanningen") {
@@ -473,6 +478,7 @@ struct CaptureScreen: View {
             }
             .padding(.horizontal, 14)
             .padding(.bottom, 8)
+            }
         }
         .foregroundStyle(.white)
         .confirmationDialog("Avbryte skanningen?", isPresented: $confirmClose, titleVisibility: .visible) {
@@ -504,7 +510,8 @@ struct CaptureScreen: View {
 
     @ViewBuilder private var panel: some View {
         VStack(alignment: .leading, spacing: 12) {
-            if cap.step != .unsupported {
+            // While walking round only the ring and one line: the camera must be visible.
+            if cap.step != .unsupported && cap.step != .capturing {
                 ScanSteps(current: stepIndex)
             }
             switch cap.step {
@@ -565,7 +572,7 @@ struct CaptureScreen: View {
                         .font(.subheadline).foregroundStyle(.secondary).monospacedDigit()
                 }
             case .done:
-                done
+                EmptyView()
             case .failed(let message):
                 Label(message, systemImage: "exclamationmark.triangle.fill")
                     .font(.subheadline.weight(.semibold)).foregroundStyle(bad)
@@ -645,16 +652,58 @@ struct CaptureScreen: View {
         }
     }
 
-    @ViewBuilder private var done: some View {
-        if let url = cap.modelURL {
-            ModelPreview(url: url)
-                .frame(height: 240)
+    /// «Formen med mål»: the shape as a drawing with dimensions first, the 3D scan only on request.
+    private var result: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 14) {
+                HStack(spacing: 12) {
+                    CloseButton(label: "Lukk") {
+                        if cap.sent == nil { confirmClose = true } else { leave() }
+                    }
+                    Spacer()
+                    Picker("Visning", selection: $drawSide) {
+                        ForEach(DrawingSide.allCases) { Text($0.label).tag($0) }
+                    }
+                    .pickerStyle(.segmented)
+                    .frame(maxWidth: 220)
+                    .disabled(showModel)
+                }
+                Group {
+                    if let s = cap.shapes, !s.parts.isEmpty, !showModel {
+                        ShapeDrawing(shapes: s, side: drawSide)
+                    } else if let url = cap.modelURL {
+                        ModelPreview(url: url)
+                    } else {
+                        Color.clear
+                    }
+                }
+                .frame(height: 330)
+                .frame(maxWidth: .infinity)
+                .background(Color.black.opacity(0.35))
                 .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+                HStack {
+                    Text("Ytre mål \(cap.sizeText)").font(.subheadline).foregroundStyle(.secondary).monospacedDigit()
+                    Spacer()
+                    if cap.modelURL != nil, let s = cap.shapes, !s.parts.isEmpty {
+                        Button(showModel ? "Vis formen" : "Vis 3D-skannet") { showModel.toggle() }
+                            .font(.subheadline.weight(.semibold))
+                            .frame(minHeight: 44)
+                    }
+                }
+                if let s = cap.shapes, !s.parts.isEmpty {
+                    PartRows(shapes: s)
+                } else {
+                    Text("Fant ingen enkle former – CadSHAPE får skannet som det er, og du kan lage en holder rundt det.")
+                        .font(.subheadline).foregroundStyle(.secondary)
+                }
+                done
+            }
+            .padding(16)
         }
-        Text(cap.sizeText).font(.title3.bold()).monospacedDigit()
-        if let s = cap.shapes, !s.parts.isEmpty {
-            ShapesCard(shapes: s)
-        }
+        .background(ground.ignoresSafeArea())
+    }
+
+    @ViewBuilder private var done: some View {
         // On the phone Apple builds models at reduced detail: right for holders and pockets, not for tight fits.
         Label("Nøyaktig til omtrent 1 mm – bra for holdere, lommer og kopier. Hull og kanter som skal sitte stramt: mål dem med «Hull».",
               systemImage: "ruler")
@@ -695,73 +744,6 @@ struct CaptureScreen: View {
             .disabled(cap.sending || cap.api == nil)
             Button("Skann på nytt") { cap.again() }.buttonStyle(SecondaryStyle())
         }
-    }
-}
-
-/// «Finn målene»: what the scan is made of, top first, with a little drawing of the stack.
-struct ShapesCard: View {
-    let shapes: ScanShapes
-
-    var body: some View {
-        HStack(alignment: .top, spacing: 14) {
-            StackDrawing(shapes: shapes)
-                .frame(width: 56, height: 96)
-            VStack(alignment: .leading, spacing: 6) {
-                Text(shapes.parts.count == 1 ? "Fant én del" : "Fant \(shapes.parts.count) deler")
-                    .font(.caption.weight(.semibold)).foregroundStyle(.secondary)
-                ForEach(Array(shapes.lines.enumerated()), id: \.offset) { _, line in
-                    Text(line).font(.subheadline.weight(.semibold)).monospacedDigit()
-                }
-                if shapes.explained < 0.6 {
-                    Text("Mye fri form – CadSHAPE beholder omrisset som profil.")
-                        .font(.caption).foregroundStyle(.secondary)
-                }
-            }
-            Spacer(minLength: 0)
-        }
-        .padding(12)
-        .background(Color.white.opacity(0.08), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
-        .accessibilityElement(children: .combine)
-    }
-}
-
-/// The parts as a side view: each one as wide as it is, stacked to scale.
-struct StackDrawing: View {
-    let shapes: ScanShapes
-
-    var body: some View {
-        Canvas { ctx, size in
-            let widest = shapes.parts.map { p -> Double in
-                switch p.kind {
-                case .cylinder: return p.d
-                case .cone: return max(p.d, p.dTop)
-                case .box: return p.w
-                case .profile: return 0
-                }
-            }.max() ?? 1
-            let scale = min(Double(size.width) / max(widest, 1), Double(size.height) / max(shapes.height, 1))
-            let bottom = shapes.parts.first?.z0 ?? 0
-            let cx = Double(size.width) / 2
-            for (i, p) in shapes.parts.enumerated() {
-                let y0 = Double(size.height) - (p.z0 - bottom) * scale
-                let y1 = Double(size.height) - (p.z1 - bottom) * scale
-                var path = Path()
-                switch p.kind {
-                case .cone:
-                    let b = p.d * scale / 2, t = p.dTop * scale / 2
-                    path.move(to: CGPoint(x: cx - b, y: y0))
-                    path.addLine(to: CGPoint(x: cx + b, y: y0))
-                    path.addLine(to: CGPoint(x: cx + t, y: y1))
-                    path.addLine(to: CGPoint(x: cx - t, y: y1))
-                    path.closeSubpath()
-                default:
-                    let wd = (p.kind == .cylinder ? p.d : p.kind == .box ? p.w : widest * 0.8) * scale
-                    path.addRect(CGRect(x: cx - wd / 2, y: y1, width: wd, height: y0 - y1))
-                }
-                ctx.fill(path, with: .color(i % 2 == 0 ? accent.opacity(0.85) : accent.opacity(0.55)))
-            }
-        }
-        .accessibilityHidden(true)
     }
 }
 

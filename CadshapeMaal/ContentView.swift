@@ -29,19 +29,16 @@ struct CloseButton: View {
     }
 }
 
-/// Measuring with the camera (holes, patterns, boxes, things, pipes, gaps) – one of the screens under «Hjem».
+/// Measuring with the camera (one hole, or the inside of a box) – one of the screens under «Hjem».
+/// The mode is fixed by the home screen's tile; this screen only shows its title.
 struct ContentView: View {
     @ObservedObject var model: MeasureModel
-    /// Back to the home screen (nil: this is the only screen, e.g. the demo).
+    /// Back to the home screen.
     var onHome: (() -> Void)? = nil
 
     var body: some View {
         ZStack {
-            if model.isDemo {
-                DemoCameraView(model: model).ignoresSafeArea()
-            } else {
-                ARMeasureView(model: model).ignoresSafeArea()
-            }
+            ARMeasureView(model: model).ignoresSafeArea()
             OverlayView(model: model, space: model.space).ignoresSafeArea().allowsHitTesting(false)
             VStack(spacing: 12) {
                 HStack(spacing: 8) {
@@ -50,6 +47,10 @@ struct ContentView: View {
                             .padding(.top, 4)
                     }
                     TopBar(model: model)
+                }
+                if !model.wantsPairing {
+                    ModeTitle(mode: model.mode)
+                        .frame(maxWidth: .infinity, alignment: .leading)
                 }
                 Spacer(minLength: 0)
                 if model.wantsPairing {
@@ -78,6 +79,21 @@ struct ContentView: View {
     }
 }
 
+/// What this camera screen measures (Hull / Inni boks), small, under the top bar.
+struct ModeTitle: View {
+    let mode: MeasureMode
+
+    var body: some View {
+        Label(mode.title, systemImage: mode == .box ? "shippingbox" : "circle.dashed")
+            .font(.footnote.weight(.semibold))
+            .padding(.horizontal, 12)
+            .padding(.vertical, 6)
+            .background(Color.black.opacity(0.35), in: Capsule())
+            .background(.ultraThinMaterial, in: Capsule())
+            .accessibilityAddTraits(.isHeader)
+    }
+}
+
 // MARK: Drawn on top of the camera
 
 /// The cross-hair, the hole's outline as found, and its size next to it.
@@ -94,7 +110,7 @@ struct OverlayView: View {
                 ctx.stroke(Path(roundedRect: frame, cornerRadius: 28), with: .color(accent), style: StrokeStyle(lineWidth: 3, dash: [18, 12]))
                 return
             }
-            // The box's floor or the object's footprint, from the LiDAR points.
+            // The box's floor, from the LiDAR points.
             if model.mode.isSpace {
                 let poly = space.polygonOnScreen
                 if poly.count > 2 && !space.locked {
@@ -104,7 +120,7 @@ struct OverlayView: View {
                     let color = space.steadiness > 0.7 ? good : accent
                     ctx.fill(p, with: .color(color.opacity(0.18)))
                     ctx.stroke(p, with: .color(color), style: StrokeStyle(lineWidth: 3, lineJoin: .round))
-                    for q in poly where model.mode == .box {
+                    for q in poly {
                         ctx.fill(Path(ellipseIn: CGRect(x: q.x - 5, y: q.y - 5, width: 10, height: 10)), with: .color(color))
                     }
                 }
@@ -125,14 +141,7 @@ struct OverlayView: View {
                     ctx.draw(label, at: CGPoint(x: mid, y: max(70, top.y - 18)), anchor: .bottom)
                 }
             }
-            // The holes already in the pattern, numbered.
-            for (i, p) in model.patternOnScreen.enumerated() {
-                guard let p else { continue }
-                let r: CGFloat = 15
-                ctx.fill(Path(ellipseIn: CGRect(x: p.x - r, y: p.y - r, width: 2 * r, height: 2 * r)), with: .color(good.opacity(0.85)))
-                ctx.draw(Text("\(i + 1)").font(.system(size: 15, weight: .bold, design: .rounded)).foregroundColor(.black), at: p)
-            }
-            if !model.locked && !model.patternLocked && !(model.mode.isSpace && space.locked) {
+            if !model.locked && !(model.mode.isSpace && space.locked) {
                 var cross = Path()
                 for (dx, dy) in [(-1.0, 0.0), (1.0, 0.0), (0.0, -1.0), (0.0, 1.0)] {
                     cross.move(to: CGPoint(x: c.x + dx * 6, y: c.y + dy * 6))
@@ -190,7 +199,7 @@ struct TopBar: View {
             .buttonStyle(.plain)
             .accessibilityLabel("Lagrede målinger")
             // Only worth saying when it is missing: then holes and boxes are measured coarser.
-            if !model.hasLidar && !model.isDemo {
+            if !model.hasLidar {
                 Label("Uten dybdesensor", systemImage: "camera")
                     .font(.footnote.weight(.semibold))
                     .padding(.horizontal, 12)
@@ -202,14 +211,12 @@ struct TopBar: View {
     }
 
     private var dot: Color {
-        if model.isDemo { return accent }
         if model.pairing == nil { return .gray }
         if model.pcOpen == true { return good }
         return model.connectionError == nil ? .yellow : .red
     }
 
     private var status: String {
-        if model.isDemo { return "Demo – uten kamera og PC" }
         guard let p = model.pairing else { return "Ikke koblet til" }
         if model.pcOpen == true { return "CadSHAPE · \(p.hostLabel)" }
         if model.pcOpen == false { return "CadSHAPE er ikke åpent" }
@@ -243,7 +250,7 @@ struct BottomPanel: View {
                     ScrollView { content }
                 }
                 // The main buttons sit below the scrolling part: always visible.
-                if !model.isCalibrating && !model.mode.isSpace && model.locked && !model.patternLocked {
+                if !model.isCalibrating && !model.mode.isSpace && model.locked {
                     LockedActions(model: model)
                 }
             }
@@ -256,8 +263,6 @@ struct BottomPanel: View {
             CalibrationContent(model: model)
         } else if model.mode.isSpace {
             SpaceContent(model: model, space: model.space)
-        } else if model.patternLocked {
-            PatternLockedContent(model: model)
         } else if model.locked {
             LockedContent(model: model)
         } else {
@@ -272,7 +277,7 @@ struct WaitingBanner: View {
     @ObservedObject var store: MeasurementStore
 
     var body: some View {
-        if model.connected && !model.isDemo && !store.waiting.isEmpty && !model.locked && !model.patternLocked && !model.space.locked {
+        if model.connected && !store.waiting.isEmpty && !model.locked && !model.space.locked {
             Button {
                 model.showSaved = true
             } label: {
@@ -321,7 +326,6 @@ struct LiveContent: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
-            ModePicker(model: model)
             SizeHeader(text: model.answer?.text ?? model.quick ?? "– mm", sure: model.uncertaintyText, unsure: model.unsure, label: model.answer?.label)
                 .foregroundStyle(model.live == nil ? Color.white.opacity(0.45) : Color.white)
             // Right under the number, a fixed two-line slot: the panel no longer jumps as the hint changes.
@@ -334,61 +338,14 @@ struct LiveContent: View {
                 Text(model.details).font(.footnote).foregroundStyle(.secondary)
             }
             SteadyBar(value: model.steadiness)
-            if model.mode == .pattern {
-                PatternLive(model: model)
-            } else {
-                Button {
-                    model.lock()
-                } label: {
-                    Label(model.autoLock ? "Lås nå" : "Lås målet", systemImage: "lock.fill")
-                }
-                .buttonStyle(PrimaryStyle(enabled: model.canLock))
-                .disabled(!model.canLock)
-            }
-        }
-    }
-}
-
-/// Adding holes to the pattern: how many, the distances, and the buttons.
-struct PatternLive: View {
-    @ObservedObject var model: MeasureModel
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            if model.pattern.isEmpty {
-                Text("Sikt på hullene ett for ett. Hvert hull legges til når målet er stødig.").font(.footnote).opacity(0.75)
-            } else {
-                Text(summary).font(.footnote.weight(.semibold)).opacity(0.85)
-            }
-            HStack(spacing: 10) {
-                Button {
-                    model.undoHole()
-                } label: {
-                    Label("Angre", systemImage: "arrow.uturn.backward")
-                }
-                .buttonStyle(SecondaryStyle())
-                .disabled(model.pattern.isEmpty)
-                Button {
-                    model.addHole()
-                } label: {
-                    Label("Legg til hull", systemImage: "plus.circle.fill")
-                }
-                .buttonStyle(SecondaryStyle())
-                .disabled(!model.canAddHole)
-            }
             Button {
-                model.finishPattern()
+                model.lock()
             } label: {
-                Label(model.pattern.count >= 2 ? "Ferdig med \(model.pattern.count) hull" : "Minst to hull", systemImage: "checkmark.circle.fill")
+                Label(model.autoLock ? "Lås nå" : "Lås målet", systemImage: "lock.fill")
             }
-            .buttonStyle(PrimaryStyle(enabled: model.pattern.count >= 2))
-            .disabled(model.pattern.count < 2)
+            .buttonStyle(PrimaryStyle(enabled: model.canLock))
+            .disabled(!model.canLock)
         }
-    }
-
-    private var summary: String {
-        let gaps = model.patternSpacings.map { mm($0) }.joined(separator: " · ")
-        return "\(model.pattern.count) hull" + (gaps.isEmpty ? "" : " · avstand \(gaps) mm")
     }
 }
 
@@ -549,46 +506,6 @@ struct LockedActions: View {
     }
 
     private var canMake: Bool { model.connected && model.shape != nil && !model.working }
-}
-
-/// A finished pattern: what to make, and the button.
-struct PatternLockedContent: View {
-    @ObservedObject var model: MeasureModel
-    @State private var adjust = false
-
-    var body: some View {
-        let holes = model.patternLayout()
-        VStack(alignment: .leading, spacing: 12) {
-            SizeHeader(text: "\(holes.count) hull", sure: nil, unsure: false, busy: model.working)
-            Text(model.patternText(holes)).font(.footnote).opacity(0.8)
-            HStack(spacing: 8) {
-                ForEach(HolesMake.allCases) { k in
-                    ChoiceCard(title: k.label, symbol: k.symbol, on: model.holesMake == k) { model.setHolesMake(k) }
-                }
-            }
-            Text(model.holesMake.hint).font(.footnote).opacity(0.75)
-            DisclosureGroup(isExpanded: $adjust) {
-                VStack(spacing: 8) {
-                    ForEach(model.holesMake.uses) { key in
-                        ParamRow(key: key, value: model.holesParams[key] ?? holesDefaults[key] ?? key.defaultValue) { model.setHolesParam(key, $0) }
-                    }
-                }
-                .padding(.top, 6)
-            } label: {
-                Text("Juster mål").font(.subheadline.weight(.semibold))
-            }
-            .tint(.white)
-            if let done = model.done {
-                Label(done, systemImage: "checkmark.circle.fill").font(.subheadline.weight(.semibold)).foregroundStyle(good)
-            }
-            if let error = model.error {
-                Label(error, systemImage: "exclamationmark.triangle.fill").font(.footnote).foregroundStyle(bad)
-            }
-            CommitButtons(connected: model.connected, done: model.done != nil, working: model.working,
-                          again: "Nytt mønster", measureAgain: model.newPattern, commit: model.commitPattern,
-                          connect: { model.showSettings = true })
-        }
-    }
 }
 
 struct ParamRow: View {
@@ -910,9 +827,9 @@ struct HowItMeasures: View {
                         .font(.footnote)
                     Text("Ser appen to kanter rundt hullet (skygge, fas eller hullets innside), låser den ikke av seg selv – du velger kanten etter låsing.")
                         .font(.footnote)
-                    Text("Inni boks og Omriss av ting bruker LiDAR-punktene fra flere bilder samlet: bunnen, de fire veggene og kanten øverst (boks), eller bordet og alt som står opp fra det (ting). Hold telefonen 25–60 cm over, rett ned. Tomme bokser og ryddige bord gir best mål; svarte og blanke flater ser LiDAR dårlig. Tynne, flate ting finnes i kamerabildet.")
+                    Text("Inni boks bruker LiDAR-punktene fra flere bilder samlet: bunnen, de fire veggene og kanten øverst. Hold telefonen 25–60 cm over, rett ned. Tomme bokser gir best mål; svarte og blanke flater ser LiDAR dårlig.")
                         .font(.footnote)
-                    Text("3D-skann («Skann en ting») gir formen med noen millimeters nøyaktighet – godt nok til holdere og lommer, ikke til stramme passformer. Mål hull og kanter som må passe med Hull-modus.")
+                    Text("3D-skann («Skann ting») gir formen med noen millimeters nøyaktighet – godt nok til holdere og lommer, ikke til stramme passformer. Mål hull og kanter som må passe med Hull-modus.")
                         .font(.footnote)
             }
         }

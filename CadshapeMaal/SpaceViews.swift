@@ -1,40 +1,8 @@
 import HoleKit
 import SwiftUI
 
-// The bottom panel for «Inni boks» and «Gjenstand»: live sizes while measuring, then what to make,
-// with a small drawing of it seen from above.
-
-/// The kinds of measuring, as a row of chips (six do not fit a segmented control).
-struct ModePicker: View {
-    @ObservedObject var model: MeasureModel
-
-    var body: some View {
-        ScrollViewReader { proxy in
-            ScrollView(.horizontal, showsIndicators: false) {
-                HStack(spacing: 6) {
-                    ForEach(MeasureMode.allCases) { m in
-                        Button {
-                            model.mode = m
-                        } label: {
-                            Label(m.short, systemImage: m.symbol)
-                                .font(.footnote.weight(.semibold))
-                                .padding(.horizontal, 11)
-                                .padding(.vertical, 8)
-                                .background(model.mode == m ? accent : Color.white.opacity(0.12), in: Capsule())
-                                .foregroundStyle(model.mode == m ? Color.black : Color.white)
-                                .frame(minHeight: 44)
-                                .contentShape(Rectangle())
-                        }
-                        .buttonStyle(.plain)
-                        .id(m)
-                        .accessibilityAddTraits(model.mode == m ? .isSelected : [])
-                    }
-                }
-            }
-            .onAppear { proxy.scrollTo(model.mode, anchor: .center) }
-        }
-    }
-}
+// The bottom panel for «Inni boks»: live sizes while measuring, then what to make, with a drawing
+// of the inside seen from above.
 
 struct SpaceContent: View {
     @ObservedObject var model: MeasureModel
@@ -42,12 +10,7 @@ struct SpaceContent: View {
 
     var body: some View {
         if space.locked {
-            switch model.mode {
-            case .box: BoxLockedContent(model: model, space: space)
-            case .object: ObjectLockedContent(model: model, space: space)
-            case .pipe: PipeLockedContent(model: model, space: space)
-            default: GapLockedContent(model: model, space: space)
-            }
+            BoxLockedContent(model: model, space: space)
         } else {
             SpaceLiveContent(model: model, space: space)
         }
@@ -60,19 +23,9 @@ struct SpaceLiveContent: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
-            ModePicker(model: model)
-            SizeHeader(text: sizeText, sure: sureText, unsure: false, label: label)
-            if model.mode == .box, let b = space.box {
+            SizeHeader(text: sizeText, sure: space.box.map { "± \(mm($0.spread)) mm" }, unsure: false, label: "innvendig")
+            if let b = space.box {
                 WallsSeen(seen: b.seen, wall: b.wall)
-            }
-            if model.mode == .object, !space.objectsBefore.isEmpty {
-                Text("\(space.objectsBefore.count) ting i brettet – nå ting nr. \(space.objectsBefore.count + 1)").font(.footnote.weight(.semibold)).opacity(0.85)
-            }
-            if model.mode == .pipe, let d = space.pipe?.diameter, let s = nearPipes(d).first {
-                Text("Nærmeste standard: Ø \(mm(s, digits: 0)) mm").font(.footnote.weight(.semibold)).opacity(0.85)
-            }
-            if model.mode == .gap, space.firstSurface != nil {
-                Label("Flate 1 er valgt", systemImage: "1.circle.fill").font(.footnote).opacity(0.8)
             }
             SteadyBar(value: space.steadiness)
             Text(space.hint).font(.subheadline.weight(.semibold)).foregroundStyle(space.steadiness > 0.7 ? good : warn)
@@ -82,71 +35,28 @@ struct SpaceLiveContent: View {
                 Label(advice, systemImage: "info.circle").font(.footnote).foregroundStyle(warn).lineLimit(2)
             }
             HStack(spacing: 10) {
-                if model.mode != .object {
-                    Button {
-                        space.typeIn()
-                    } label: {
-                        Label("Skriv inn", systemImage: "keyboard")
-                    }
-                    .buttonStyle(SecondaryStyle())
+                Button {
+                    space.typeIn()
+                } label: {
+                    Label("Skriv inn", systemImage: "keyboard")
                 }
-                if model.mode == .gap {
-                    Button {
-                        space.takeSurface()
-                    } label: {
-                        Label(space.firstSurface == nil ? "Flate 1" : "Flate 2", systemImage: space.firstSurface == nil ? "1.circle.fill" : "2.circle.fill")
-                    }
-                    .buttonStyle(PrimaryStyle(enabled: space.canTakeSurface))
-                    .disabled(!space.canTakeSurface)
-                } else {
-                    Button {
-                        space.lock()
-                    } label: {
-                        Label(model.autoLock ? "Lås nå" : "Lås målet", systemImage: "lock.fill")
-                    }
-                    .buttonStyle(PrimaryStyle(enabled: space.canLock))
-                    .disabled(!space.canLock)
+                .buttonStyle(SecondaryStyle())
+                Button {
+                    space.lock()
+                } label: {
+                    Label(model.autoLock ? "Lås nå" : "Lås målet", systemImage: "lock.fill")
                 }
+                .buttonStyle(PrimaryStyle(enabled: space.canLock))
+                .disabled(!space.canLock)
             }
         }
     }
 
-    private var label: String? {
-        switch model.mode {
-        case .box: return "innvendig"
-        case .object: return space.object?.sharpened == true ? "skarp kant" : "fotavtrykk"
-        case .pipe: return space.measuringSecond ? "rør 2" : "utvendig"
-        default: return nil
-        }
-    }
-
     private var sizeText: String {
-        switch model.mode {
-        case .box:
-            guard let b = space.box else { return "Sikt på bunnen" }
-            // ± 20 mm is not a measure: say so instead of showing numbers that look exact.
-            if b.spread > max(3, 0.08 * min(b.width, b.length)) { return "Ser ikke boksen ennå" }
-            return "\(mm(b.width, digits: 0)) × \(mm(b.length, digits: 0))" + (b.height.map { " × \(mm($0, digits: 0))" } ?? "") + " mm"
-        case .object:
-            guard let o = space.object else { return "Sikt på tingen" }
-            return "\(mm(o.width, digits: 0)) × \(mm(o.length, digits: 0)) mm, \(mm(o.height, digits: 0)) høy"
-        case .pipe:
-            guard let p = space.pipe else { return "Sikt på røret" }
-            // Only the front of the pipe seen: a short arc fits any diameter (a Ø38 bottle read as Ø84).
-            if p.coverage > 0 && p.coverage < 70 { return "Se mer av røret" }
-            return "Ø \(mm(p.diameter)) mm"
-        default:
-            return space.surface == nil ? "Sikt på en flate" : (space.firstSurface == nil ? "Flate 1" : "Flate 2")
-        }
-    }
-
-    private var sureText: String? {
-        switch model.mode {
-        case .box: return space.box.map { "± \(mm($0.spread)) mm" }
-        case .object: return space.object.map { $0.sharpened ? "± 0,7 mm (kanten fra bildet)" : "± 2 mm (LiDAR)" }
-        case .pipe: return space.pipe.map { $0.coverage > 0 && $0.coverage < 70 ? "bare \(Int($0.coverage))° av runden sett" : "avvik fra sylinder \(mm($0.residual)) mm" }
-        default: return nil
-        }
+        guard let b = space.box else { return "Sikt på bunnen" }
+        // ± 20 mm is not a measure: say so instead of showing numbers that look exact.
+        if b.spread > max(3, 0.08 * min(b.width, b.length)) { return "Ser ikke boksen ennå" }
+        return "\(mm(b.width, digits: 0)) × \(mm(b.length, digits: 0))" + (b.height.map { " × \(mm($0, digits: 0))" } ?? "") + " mm"
     }
 }
 
@@ -168,7 +78,7 @@ struct WallsSeen: View {
 
 // MARK: The inside of a box
 
-private enum DimField: Hashable { case width, length, height, diameter, second, gap, angle }
+private enum DimField: Hashable { case width, length, height }
 
 struct BoxLockedContent: View {
     @ObservedObject var model: MeasureModel
@@ -191,17 +101,19 @@ struct BoxLockedContent: View {
                     }
                 }
             }
-            ScrollView(.horizontal, showsIndicators: false) {
-                HStack(spacing: 8) {
-                    ForEach(BoxMake.allCases) { k in
-                        ChoiceCard(title: k.short, symbol: k.symbol, on: space.boxMake == k) { space.setBoxMake(k) }
-                            .frame(width: 84)
-                    }
+            Picker("Lag", selection: Binding(get: { space.boxMake }, set: { space.setBoxMake($0) })) {
+                ForEach(BoxMake.offered) { k in
+                    Text(k.choice).tag(k)
                 }
             }
-            BoxSketch(box: space.boxOut, make: space.boxMake, cols: Int(space.values[.cols] ?? 3), rows: Int(space.values[.rows] ?? 2), clearance: space.values[.clearance] ?? 0.5)
-                .frame(height: 130)
-            Text(space.boxMake.hint).font(.footnote).opacity(0.75)
+            .pickerStyle(.segmented)
+            .controlSize(.large)
+            if space.boxMake.hasRooms {
+                VStack(spacing: 4) {
+                    RoomStepper(param: .cols, value: space.values[.cols] ?? SpaceParam.cols.defaultValue) { space.setValue(.cols, $0) }
+                    RoomStepper(param: .rows, value: space.values[.rows] ?? SpaceParam.rows.defaultValue) { space.setValue(.rows, $0) }
+                }
+            }
             if space.boxMake == .gridfinity {
                 VStack(alignment: .leading, spacing: 6) {
                     Text("Bokser som fyller skuffen").font(.subheadline)
@@ -215,11 +127,9 @@ struct BoxLockedContent: View {
                     }
                 }
             }
-            VStack(spacing: 8) {
-                ForEach(space.boxMake.uses.filter { $0.isCount }) { p in
-                    SpaceParamRow(param: p, value: space.values[p] ?? p.defaultValue, auto: nil) { space.setValue(p, $0) }
-                }
-            }
+            BoxSketch(box: space.boxOut, make: space.boxMake, cols: Int(space.values[.cols] ?? 3), rows: Int(space.values[.rows] ?? 2), clearance: space.values[.clearance] ?? 0.5)
+                .frame(height: 150)
+            Text(space.boxMake.hint).font(.footnote).opacity(0.75)
             DisclosureGroup(isExpanded: $adjust) {
                 VStack(spacing: 8) {
                     ForEach(space.boxMake.uses.filter { !$0.isCount }) { p in
@@ -234,6 +144,36 @@ struct BoxLockedContent: View {
             SpaceStatus(space: space)
             SpaceButtons(model: model, space: space, again: space.manual ? "Mål med LiDAR" : "Mål på nytt")
         }
+    }
+}
+
+/// Number of rooms one way: big − and + (44 pt), the count in the middle.
+struct RoomStepper: View {
+    let param: SpaceParam
+    let value: Double
+    let change: (Double) -> Void
+
+    var body: some View {
+        HStack(spacing: 10) {
+            VStack(alignment: .leading, spacing: 1) {
+                Text(param.label).font(.subheadline.weight(.semibold))
+                Text(param == .cols ? "rom i bredden" : "rom i lengden").font(.caption).opacity(0.65)
+            }
+            Spacer(minLength: 4)
+            Button { change(value - 1) } label: { Image(systemName: "minus") }
+                .buttonStyle(RoundStyle())
+                .disabled(value <= param.range.lowerBound)
+                .accessibilityLabel("Færre rom \(param.label.lowercased())")
+            Text("\(Int(value))")
+                .font(.title3.weight(.bold))
+                .monospacedDigit()
+                .frame(minWidth: 36)
+            Button { change(value + 1) } label: { Image(systemName: "plus") }
+                .buttonStyle(RoundStyle())
+                .disabled(value >= param.range.upperBound)
+                .accessibilityLabel("Flere rom \(param.label.lowercased())")
+        }
+        .accessibilityElement(children: .contain)
     }
 }
 
@@ -282,25 +222,19 @@ struct SpaceParamRow: View {
     let change: (Double) -> Void
 
     var body: some View {
-        if param.isSwitch {
-            Toggle(param.label, isOn: Binding(get: { value >= 0.5 }, set: { change($0 ? 1 : 0) }))
-                .font(.subheadline)
-                .tint(accent)
-        } else {
-            HStack(spacing: 10) {
-                Text(param.label).font(.subheadline)
-                Spacer(minLength: 4)
-                Button { change(value - param.step) } label: { Image(systemName: "minus") }
-                    .buttonStyle(RoundStyle())
-                Text(valueText)
-                    .font(.subheadline.weight(.semibold))
-                    .monospacedDigit()
-                    .lineLimit(1)
-                    .minimumScaleFactor(0.7)
-                    .frame(minWidth: 76)
-                Button { change(value + param.step) } label: { Image(systemName: "plus") }
-                    .buttonStyle(RoundStyle())
-            }
+        HStack(spacing: 10) {
+            Text(param.label).font(.subheadline)
+            Spacer(minLength: 4)
+            Button { change(value - param.step) } label: { Image(systemName: "minus") }
+                .buttonStyle(RoundStyle())
+            Text(valueText)
+                .font(.subheadline.weight(.semibold))
+                .monospacedDigit()
+                .lineLimit(1)
+                .minimumScaleFactor(0.7)
+                .frame(minWidth: 76)
+            Button { change(value + param.step) } label: { Image(systemName: "plus") }
+                .buttonStyle(RoundStyle())
         }
     }
 
@@ -373,264 +307,7 @@ struct BoxSketch: View {
             ctx.draw(Text("\(mm(box.width, digits: 0)) mm").font(font).foregroundColor(.white.opacity(0.8)), at: CGPoint(x: Double(inside.midX), y: Double(inside.maxY) + 9))
             ctx.draw(Text("\(mm(box.length, digits: 0))").font(font).foregroundColor(.white.opacity(0.8)), at: CGPoint(x: Double(inside.minX) - 12, y: cy))
         }
-        .accessibilityLabel("Tegning av boksen sett ovenfra")
-    }
-}
-
-// MARK: Something on a table
-
-struct ObjectLockedContent: View {
-    @ObservedObject var model: MeasureModel
-    @ObservedObject var space: SpaceModel
-
-    var body: some View {
-        let list = space.allObjects
-        VStack(alignment: .leading, spacing: 12) {
-            if let o = list.last {
-                SizeHeader(text: list.count == 1 ? "\(mm(o.width, digits: 0)) × \(mm(o.length, digits: 0)) mm" : "\(list.count) ting", sure: list.count == 1 ? "\(mm(o.height, digits: 0)) mm høy" : nil, unsure: false, label: list.count == 1 ? "fotavtrykk" : "i samme brett", busy: space.working)
-                if list.count > 1 {
-                    ScrollView(.horizontal, showsIndicators: false) {
-                        HStack(spacing: 6) {
-                            ForEach(0..<list.count, id: \.self) { i in
-                                Button {
-                                    space.removeObject(at: i)
-                                } label: {
-                                    Label("\(mm(list[i].width, digits: 0)) × \(mm(list[i].length, digits: 0))", systemImage: "xmark.circle.fill")
-                                }
-                                .buttonStyle(ChipStyle(on: false))
-                            }
-                        }
-                    }
-                }
-                HStack(spacing: 8) {
-                    ForEach(ObjectMake.allCases) { k in
-                        ChoiceCard(title: k.short, symbol: k.symbol, on: space.objectMake == k) { space.setObjectMake(k) }
-                    }
-                }
-                ObjectSketch(objects: list, make: space.objectMake, clearance: space.values[.clearanceObject] ?? 1, rim: space.values[.rim] ?? 6, notch: (space.values[.notch] ?? 1) >= 0.5)
-                    .frame(height: 130)
-                Text(space.objectMake.hint).font(.footnote).opacity(0.75)
-                Button {
-                    space.addAnotherObject()
-                } label: {
-                    Label("Legg til en ting til", systemImage: "plus.circle.fill")
-                }
-                .buttonStyle(SecondaryStyle())
-                .disabled(list.count >= 12)
-                VStack(spacing: 8) {
-                    ForEach(space.objectMake.uses) { p in
-                        SpaceParamRow(param: p, value: space.values[p] ?? p.defaultValue, auto: p == .depth ? max(3, min(80, (list.map(\.height).max() ?? o.height) * 0.8)) : nil) { space.setValue(p, $0) }
-                    }
-                }
-            }
-            SpaceStatus(space: space)
-            SpaceButtons(model: model, space: space, again: "Mål på nytt")
-        }
-    }
-}
-
-// MARK: A pipe
-
-struct PipeLockedContent: View {
-    @ObservedObject var model: MeasureModel
-    @ObservedObject var space: SpaceModel
-    @FocusState private var focus: DimField?
-
-    var body: some View {
-        let p = space.pipeOut
-        VStack(alignment: .leading, spacing: 12) {
-            SizeHeader(text: SpaceModel.text(p).replacingOccurrences(of: "Rør ", with: ""), sure: space.spread.map { "± \(mm($0)) mm" }, unsure: (space.spread ?? 0) > 2, label: space.manual ? "skrevet inn" : "utvendig", busy: space.working)
-            StandardChips(value: p.diameter) { space.setPipe(diameter: $0) }
-            VStack(spacing: 6) {
-                DimRow(label: "Diameter", value: p.diameter, focus: $focus, field: .diameter, step: 0.1) { space.setPipe(diameter: $0) }
-                if p.second != nil || space.pipeMake == .adapter {
-                    DimRow(label: "Rør 2", value: p.second ?? p.diameter, focus: $focus, field: .second, step: 0.1) { space.setPipe(second: $0) }
-                }
-                if focus != nil {
-                    Button("Ferdig") { focus = nil }
-                        .buttonStyle(ChipStyle(on: true))
-                        .frame(maxWidth: .infinity, alignment: .trailing)
-                }
-            }
-            HStack(spacing: 8) {
-                ForEach(PipeMake.allCases) { k in
-                    ChoiceCard(title: k.label, symbol: k.symbol, on: space.pipeMake == k) { space.setPipeMake(k) }
-                }
-            }
-            Text(space.pipeMake.hint).font(.footnote).opacity(0.75)
-            if space.pipeMake == .adapter && !space.manual {
-                Button {
-                    space.measureSecond()
-                } label: {
-                    Label(p.second == nil ? "Mål den andre diameteren" : "Mål rør 2 på nytt", systemImage: "camera.metering.center.weighted")
-                }
-                .buttonStyle(SecondaryStyle())
-            }
-            VStack(spacing: 8) {
-                ForEach(space.pipeMake.uses) { q in
-                    SpaceParamRow(param: q, value: space.values[q] ?? q.defaultValue, auto: nil) { space.setValue(q, $0) }
-                }
-            }
-            SpaceStatus(space: space)
-            SpaceButtons(model: model, space: space, again: space.manual ? "Mål med LiDAR" : "Mål på nytt")
-        }
-    }
-}
-
-/// Standard pipe sizes near the measured one, one tap to use.
-struct StandardChips: View {
-    let value: Double
-    let use: (Double) -> Void
-
-    var body: some View {
-        let near = nearPipes(value)
-        if !near.isEmpty {
-            HStack(spacing: 8) {
-                Text("Standard:").font(.footnote).opacity(0.75)
-                ForEach(near, id: \.self) { s in
-                    Button("Ø \(mm(s, digits: 0))") { use(s) }
-                        .buttonStyle(ChipStyle(on: abs(s - value) < 0.01))
-                }
-            }
-        }
-    }
-}
-
-// MARK: A gap
-
-struct GapLockedContent: View {
-    @ObservedObject var model: MeasureModel
-    @ObservedObject var space: SpaceModel
-    @FocusState private var focus: DimField?
-
-    var body: some View {
-        let g = space.gapOut
-        VStack(alignment: .leading, spacing: 12) {
-            SizeHeader(text: "\(mm(g.gap)) mm", sure: g.angle >= 0.5 ? "\(mm(g.angle))° skjevt" : "parallelle flater", unsure: false, label: space.manual ? "skrevet inn" : "spalte", busy: space.working)
-            VStack(spacing: 6) {
-                DimRow(label: "Spalte", value: g.gap, focus: $focus, field: .gap, step: 0.1) { space.setGap($0) }
-                DimRow(label: "Vinkel", value: g.angle, focus: $focus, field: .angle, unit: "°", step: 0.5) { space.setGap(angle: $0) }
-                if focus != nil {
-                    Button("Ferdig") { focus = nil }
-                        .buttonStyle(ChipStyle(on: true))
-                        .frame(maxWidth: .infinity, alignment: .trailing)
-                }
-            }
-            HStack(spacing: 8) {
-                ForEach(GapMake.allCases) { k in
-                    ChoiceCard(title: k.label, symbol: k.symbol, on: space.gapMake == k) { space.setGapMake(k) }
-                }
-            }
-            Text(space.gapMake.hint).font(.footnote).opacity(0.75)
-            VStack(spacing: 8) {
-                ForEach(space.gapMake.uses) { q in
-                    SpaceParamRow(param: q, value: space.values[q] ?? q.defaultValue, auto: nil) { space.setValue(q, $0) }
-                }
-            }
-            SpaceStatus(space: space)
-            SpaceButtons(model: model, space: space, again: space.manual ? "Mål med LiDAR" : "Mål på nytt")
-        }
-    }
-}
-
-/// The footprints from above (in rows, as CadSHAPE lays them out), the pockets and what holds them.
-struct ObjectSketch: View {
-    let objects: [ObjectOut]
-    let make: ObjectMake
-    let clearance: Double
-    let rim: Double
-    let notch: Bool
-
-    private struct Item {
-        var pts: [[Double]]
-        var w: Double
-        var l: Double
-        var c = (0.0, 0.0)
-    }
-
-    /// Long side along x, deepest first, rows no wider than the plate allows (as packPockets).
-    private func layout() -> (items: [Item], w: Double, l: Double) {
-        let gap = 4.0
-        var items: [Item] = objects.map { o in
-            let turn = o.length > o.width + 0.01
-            let pts = turn ? o.outline.map { [-$0[1], $0[0]] } : o.outline
-            return Item(pts: pts, w: (turn ? o.length : o.width) + 2 * clearance, l: (turn ? o.width : o.length) + 2 * clearance)
-        }
-        let order = items.indices.sorted { items[$0].l > items[$1].l }
-        let area = items.reduce(0) { $0 + ($1.w + gap) * ($1.l + gap) }
-        let limit = max(items.map(\.w).max() ?? 0, min(203, area.squareRoot() * 1.3))
-        var rows: [(ids: [Int], w: Double, l: Double)] = []
-        for i in order {
-            if var last = rows.last, last.w + gap + items[i].w <= limit + 1e-6 {
-                last.ids.append(i)
-                last.w += gap + items[i].w
-                last.l = max(last.l, items[i].l)
-                rows[rows.count - 1] = last
-            } else {
-                rows.append(([i], items[i].w, items[i].l))
-            }
-        }
-        let rowGap = notch ? 13.0 + 2 : gap
-        let total = rows.reduce(0) { $0 + $1.l } + rowGap * Double(max(0, rows.count - 1))
-        var y = total / 2
-        for r in rows {
-            var x = -r.w / 2
-            for i in r.ids {
-                items[i].c = (x + items[i].w / 2, y - items[i].l / 2)
-                x += items[i].w + gap
-            }
-            y -= r.l + rowGap
-        }
-        return (items, rows.map { $0.w }.max() ?? 0, total)
-    }
-
-    var body: some View {
-        Canvas { ctx, size in
-            let lay = layout()
-            let W: Double = make == .tray ? lay.w + 2 * rim : ceil((lay.w + 5.5) / 42) * 42 - 0.5
-            let L: Double = make == .tray ? lay.l + 2 * rim : ceil((lay.l + 5.5) / 42) * 42 - 0.5
-            let pad = 12.0
-            let sw = Double(size.width), sh = Double(size.height)
-            let k = min((sw - 2 * pad) / max(1, W), (sh - 2 * pad) / max(1, L))
-            let cx = sw / 2, cy = sh / 2
-            func pt(_ x: Double, _ y: Double) -> CGPoint { CGPoint(x: cx + x * k, y: cy - y * k) }
-            let slab = CGRect(x: cx - W / 2 * k, y: cy - L / 2 * k, width: W * k, height: L * k)
-            ctx.fill(Path(roundedRect: slab, cornerRadius: 6), with: .color(accent.opacity(0.85)))
-            if make == .gridfinity {
-                var g = Path()
-                var x = -W / 2 + 42
-                while x < W / 2 - 1 {
-                    g.move(to: pt(x, -L / 2))
-                    g.addLine(to: pt(x, L / 2))
-                    x += 42
-                }
-                var y = -L / 2 + 42
-                while y < L / 2 - 1 {
-                    g.move(to: pt(-W / 2, y))
-                    g.addLine(to: pt(W / 2, y))
-                    y += 42
-                }
-                ctx.stroke(g, with: .color(.black.opacity(0.25)), lineWidth: 1)
-            }
-            let edge = CGFloat(max(1, 2 * clearance * k))
-            for it in lay.items {
-                var pocket = Path()
-                if let first = it.pts.first, first.count >= 2 {
-                    pocket.move(to: pt(it.c.0 + first[0], it.c.1 + first[1]))
-                    for q in it.pts.dropFirst() where q.count >= 2 { pocket.addLine(to: pt(it.c.0 + q[0], it.c.1 + q[1])) }
-                    pocket.closeSubpath()
-                }
-                // The clearance as a thicker edge round the outline.
-                ctx.stroke(pocket, with: .color(.black.opacity(0.8)), style: StrokeStyle(lineWidth: edge, lineJoin: .round))
-                ctx.fill(pocket, with: .color(.black.opacity(0.8)))
-                if notch {
-                    let d = max(14, min(26, min(it.w, it.l) * 0.5)) * k
-                    let c = pt(it.c.0, it.c.1 - it.l / 2)
-                    ctx.fill(Path(ellipseIn: CGRect(x: Double(c.x) - d / 2, y: Double(c.y) - d / 2, width: d, height: d)), with: .color(.black.opacity(0.8)))
-                }
-            }
-        }
-        .accessibilityLabel("Tegning av brettet med lommene sett ovenfra")
+        .accessibilityLabel("Boksen sett ovenfra, \(mm(box.width, digits: 0)) × \(mm(box.length, digits: 0)) mm innvendig, \(cols) × \(rows) rom")
     }
 }
 

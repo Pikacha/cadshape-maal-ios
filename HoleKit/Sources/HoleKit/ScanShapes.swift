@@ -28,6 +28,8 @@ public struct ScanPart {
     /// Free outline: how many corners.
     public var points: Int = 0
     public var centre = P2(0, 0)
+    /// How much the slices of this part disagree with its measures (mm, RMS) – green below 0,5.
+    public var spread: Double = 0
 
     public var height: Double { z1 - z0 }
 
@@ -282,6 +284,10 @@ private func lineFit(_ sl: [Slice]) -> (a: Double, b: Double, rms: Double) {
     return (a, b, (rms / n).squareRoot())
 }
 
+private func rmsOf(_ xs: [Double]) -> Double {
+    xs.isEmpty ? 0 : (xs.reduce(0) { $0 + $1 * $1 } / Double(xs.count)).squareRoot()
+}
+
 private func dist(_ a: P2, _ b: P2) -> Double { ((a.x - b.x) * (a.x - b.x) + (a.y - b.y) * (a.y - b.y)).squareRoot() }
 
 private func fits(_ kind: SliceKind, _ sl: [Slice], _ s: Slice) -> Bool {
@@ -419,21 +425,31 @@ public func fitScanShapes(_ mesh: TriangleMesh) -> ScanShapes? {
             let fit = use.count >= 3 ? lineFit(use) : (a: 0.0, b: d, rms: 0.0)
             let dLo = fit.a * lo + fit.b, dHi = fit.a * hi + fit.b
             if abs(dHi - dLo) > max(1, d * 0.05) {
-                parts.append(ScanPart(kind: .cone, z0: lo, z1: hi, d: dLo, dTop: dHi, centre: c))
+                var p = ScanPart(kind: .cone, z0: lo, z1: hi, d: dLo, dTop: dHi, centre: c)
+                p.spread = fit.rms / 2
+                parts.append(p)
             } else {
                 let inners = use.compactMap(\.inner)
                 let inner = Double(inners.count) >= Double(use.count) * 0.6 ? median(inners) : nil
-                parts.append(ScanPart(kind: .cylinder, z0: lo, z1: hi, d: d, inner: inner, centre: c))
+                var p = ScanPart(kind: .cylinder, z0: lo, z1: hi, d: d, inner: inner, centre: c)
+                p.spread = rmsOf(use.map { ($0.d - d) / 2 })
+                parts.append(p)
             }
             explained += hi - lo
         case .rect:
             let corner = median(use.map(\.corner))
-            parts.append(ScanPart(kind: .box, z0: lo, z1: hi, w: median(use.map(\.w)), l: median(use.map(\.l)),
-                                  angle: median(use.map(\.angle)), corner: corner < 0.4 ? 0 : corner, centre: c))
+            let w = median(use.map(\.w)), l = median(use.map(\.l))
+            var p = ScanPart(kind: .box, z0: lo, z1: hi, w: w, l: l,
+                             angle: median(use.map(\.angle)), corner: corner < 0.4 ? 0 : corner, centre: c)
+            p.spread = rmsOf(use.flatMap { [($0.w - w) / 2, ($0.l - l) / 2] })
+            parts.append(p)
             explained += hi - lo
         case .free:
             let mid = use[use.count / 2]
-            parts.append(ScanPart(kind: .profile, z0: lo, z1: hi, points: mid.corners, centre: mid.centroid))
+            // Its outer size (for the drawing); the outline itself is made by CadSHAPE.
+            var p = ScanPart(kind: .profile, z0: lo, z1: hi, w: mid.w, l: mid.l, angle: mid.angle, points: mid.corners, centre: mid.centroid)
+            p.spread = rmsOf(use.map { ($0.area.squareRoot() - mid.area.squareRoot()) / 2 })
+            parts.append(p)
             explained += (hi - lo) * 0.35
         }
     }

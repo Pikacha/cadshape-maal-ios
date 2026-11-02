@@ -39,9 +39,8 @@ final class Measurer: NSObject, ARSessionDelegate {
     /// Main thread only.
     private var busy = false
     private var last: TimeInterval = 0
-    private var lastProjected: TimeInterval = 0
     private var lastOutlineProjection: TimeInterval = 0
-    /// Box and object modes: the last frames' LiDAR points together (used on `queue` only).
+    /// Box mode: the last frames' LiDAR points together (used on `queue` only).
     private let cloud = PointCloudFrames()
     /// World-space edge of the last valid hole; projected with every current camera frame.
     private var holeOutline = TrackedHoleOutline()
@@ -53,7 +52,7 @@ final class Measurer: NSObject, ARSessionDelegate {
 
     private var config: ARWorldTrackingConfiguration?
 
-    /// Goes on after a pause, in the same room (the hole pattern keeps its places).
+    /// Goes on after a pause, in the same room.
     func resume() {
         guard let view, let config else { return }
         view.session.run(config)
@@ -80,11 +79,9 @@ final class Measurer: NSObject, ARSessionDelegate {
         model.hasLidar = ARWorldTrackingConfiguration.supportsFrameSemantics(.sceneDepth)
         // An old camera error (e.g. the camera still busy right after the 3D scan) is gone now.
         model.fatal = nil
-        // New tracking = a new world: holes of an unfinished pattern would no longer line up.
-        if !model.pattern.isEmpty && !model.patternLocked { model.newPattern() }
         view?.session.run(config, options: [.resetTracking, .removeExistingAnchors])
         // Back on a locked measurement: no need for the camera (battery) until «Mål på nytt».
-        if model.locked || model.patternLocked || model.space.locked { view?.session.pause() }
+        if model.locked || model.space.locked { view?.session.pause() }
     }
 
     private var retried = false
@@ -102,19 +99,9 @@ final class Measurer: NSObject, ARSessionDelegate {
     }
 
     func session(_ session: ARSession, didUpdate frame: ARFrame) {
-        if !model.locked && !model.patternLocked && !model.mode.isSpace && !model.wantsPairing && frame.timestamp - lastOutlineProjection >= 0.05 {
+        if !model.locked && !model.mode.isSpace && !model.wantsPairing && frame.timestamp - lastOutlineProjection >= 0.05 {
             lastOutlineProjection = frame.timestamp
             refreshOutline(frame)
-        }
-        // The pattern's holes follow the camera on screen.
-        if let view, !model.pattern.isEmpty, frame.timestamp - lastProjected > 0.05 {
-            lastProjected = frame.timestamp
-            let points = model.pattern.map { e -> CGPoint? in
-                let p = view.projectPoint(SCNVector3(e.world.x, e.world.y, e.world.z))
-                return p.z > 0 && p.z < 1 ? CGPoint(x: CGFloat(p.x), y: CGFloat(p.y)) : nil
-            }
-            // Only publish a change: every write redraws the whole screen.
-            if points != model.patternOnScreen { model.patternOnScreen = points }
         }
         let mode = model.mode
         let spaceMode = mode.isSpace && !model.space.locked && !model.wantsPairing
@@ -129,7 +116,6 @@ final class Measurer: NSObject, ARSessionDelegate {
         let pairing = model.wantsPairing
         let measuring = !model.locked && !pairing && !mode.isSpace
         let capturedTracking = frame.camera.trackingState
-        let cameraToWorld = frame.camera.transform
         let imageWidth = Double(frame.camera.imageResolution.width)
         var fallback: Plane? = nil
         // ARKit's own plane under the cross-hair: used when the LiDAR points round the hole do not
@@ -144,7 +130,7 @@ final class Measurer: NSObject, ARSessionDelegate {
             let generation = model.space.generation
             queue.async { [weak self] in
                 guard let self else { return }
-                let result = self.measureSpace(frame, seed: seed, generation: generation, mode: mode)
+                let result = self.measureSpace(frame, seed: seed, generation: generation)
                 DispatchQueue.main.async {
                     self.busy = false
                     // Changed mode or started again while this was measured.
@@ -156,12 +142,7 @@ final class Measurer: NSObject, ARSessionDelegate {
                     }
                     let shown = screen.count == result.world.count ? screen : []
                     let space = self.model.space
-                    switch mode {
-                    case .box: space.update(box: result.box, screen: shown)
-                    case .object: space.update(object: result.object, screen: shown)
-                    case .pipe: space.update(pipe: result.pipe, screen: shown)
-                    default: space.update(surface: result.surface, screen: shown)
-                    }
+                    space.update(box: result.box, screen: shown)
                     if space.advice != result.advice { space.advice = result.advice }
                 }
             }
@@ -176,7 +157,7 @@ final class Measurer: NSObject, ARSessionDelegate {
                 for text in FrameReader.qrTexts(frame.capturedImage) {
                     if let p = Pairing.parse(text) { found = p; break }
                     // The QR code of CadSHAPE on the web (kloki.no/cadshape): log in there instead.
-                    if web == nil, let u = Pairing.webAddress(text), u.host.map({ !$0.first!.isNumber }) == true { web = u }
+                    if web == nil, let u = Pairing.webAddress(text), u.host.map({ !($0.first?.isNumber ?? true) }) == true { web = u }
                 }
             }
             var result: Result<FrameMeasurement, MeasureFailure>? = nil
@@ -219,7 +200,7 @@ final class Measurer: NSObject, ARSessionDelegate {
                 } else {
                     qualityTracking = capturedTracking
                 }
-                self.model.measured(result, toScreen: toScreen, tracking: qualityTracking, cameraToWorld: cameraToWorld,
+                self.model.measured(result, toScreen: toScreen, tracking: qualityTracking,
                     screenOutline: self.projectedOutline(current))
             }
         }
@@ -247,55 +228,17 @@ final class Measurer: NSObject, ARSessionDelegate {
 }
 
 extension Measurer {
-    /// The point cloud of the last frames and the box or object in it. Nil without LiDAR.
+    /// The point cloud of the last frames and the box in it. Nil without LiDAR.
     fileprivate struct SpaceResult {
         var box: BoxFit?
-        var object: ObjectFit?
-        var pipe: CylinderFit?
-        var surface: SurfaceHit?
         /// What to draw over the picture (world points, closed).
         var world: [V3] = []
-        /// Said under the live sizes: why the measurement may be poor (dark surface, thin thing).
+        /// Said under the live sizes: why the measurement may be poor (dark surface).
         var advice: String?
     }
 
-    /// A thin thing's outline from the camera picture: Vision's foreground mask, the part under the
-    /// cross-hair, laid onto the table the LiDAR found.
-    fileprivate func thinObject(_ frame: ARFrame, seed: CGPoint, K: Intrinsics, pose: CameraPose, aim: V3, right: V3) -> ObjectFit? {
-        let request = VNGenerateForegroundInstanceMaskRequest()
-        let handler = VNImageRequestHandler(cvPixelBuffer: frame.capturedImage, orientation: .up)
-        guard (try? handler.perform([request])) != nil, let obs = request.results?.first else { return nil }
-        let labels = obs.instanceMask
-        CVPixelBufferLockBaseAddress(labels, .readOnly)
-        defer { CVPixelBufferUnlockBaseAddress(labels, .readOnly) }
-        guard let base = CVPixelBufferGetBaseAddress(labels) else { return nil }
-        let w = CVPixelBufferGetWidth(labels), h = CVPixelBufferGetHeight(labels)
-        let row = CVPixelBufferGetBytesPerRow(labels)
-        let px = base.assumingMemoryBound(to: UInt8.self)
-        guard w > 0, h > 0 else { return nil }
-        let ax = min(w - 1, max(0, Int(Double(seed.x) * Double(w))))
-        let ay = min(h - 1, max(0, Int(Double(seed.y) * Double(h))))
-        // The instance under the cross-hair, or the nearest one within a few percent of the picture.
-        var label: UInt8 = 0
-        var best = Int.max
-        let reach = max(4, w / 25)
-        for y in max(0, ay - reach)...min(h - 1, ay + reach) {
-            for x in max(0, ax - reach)...min(w - 1, ax + reach) {
-                let v = px[y * row + x]
-                let d = (x - ax) * (x - ax) + (y - ay) * (y - ay)
-                if v != 0 && d < best { best = d; label = v }
-            }
-        }
-        guard label != 0 else { return nil }
-        var mask = [UInt8](repeating: 0, count: w * h)
-        for y in 0..<h { for x in 0..<w where px[y * row + x] == label { mask[y * w + x] = 1 } }
-        let imageWidth = Double(frame.camera.imageResolution.width)
-        return objectFromMask(mask, width: w, height: h, aim: P2(Double(ax), Double(ay)), maskToImage: imageWidth / Double(w),
-                              intrinsics: K, pose: pose, points: cloud.points, aimWorld: aim, right: right)
-    }
-
-    /// The point cloud of the last frames and the box, object, pipe or surface in it. Nil without LiDAR.
-    fileprivate func measureSpace(_ frame: ARFrame, seed: CGPoint, generation: Int, mode: MeasureMode) -> SpaceResult? {
+    /// The point cloud of the last frames and the box in it. Nil without LiDAR.
+    fileprivate func measureSpace(_ frame: ARFrame, seed: CGPoint, generation: Int) -> SpaceResult? {
         // Points from a camera that has lost its place (or moves fast) land in the wrong spot in
         // the world and double the walls: skip such frames (counts as one miss).
         guard case .normal = frame.camera.trackingState else { return nil }
@@ -318,47 +261,8 @@ extension Measurer {
         guard let aim = pointAt(dm, intrinsics: K, imageWidth: iw, imageHeight: ih, pose: pose, u: Double(seed.x) * iw, v: Double(seed.y) * ih) else {
             return SpaceResult(advice: darkAdvice)
         }
-        switch mode {
-        case .box:
-            let fit = fitBox(cloud.points, aim: aim, right: right)
-            return SpaceResult(box: fit, world: fit?.corners ?? [], advice: darkAdvice)
-        case .object:
-            var fit = fitObject(cloud.points, aim: aim, right: right)
-            var advice = darkAdvice
-            // Thin, flat things (a spanner, a ruler) hardly stand out from the table for the LiDAR:
-            // take their outline from the camera picture instead, laid onto the table.
-            if fit == nil || (fit?.height ?? 0) < 8, let thin = thinObject(frame, seed: seed, K: K, pose: pose, aim: aim, right: right) {
-                fit = thin
-                advice = "Tynn ting – omrisset er fra kamerabildet. Hold telefonen rett over, med jevnt lys."
-            } else if var lidar = fit,
-                      let gray = FrameReader.gray(frame.capturedImage)?.blurred(),
-                      let sharp = refineOutline(lidar, gray: gray, scale: iw / Double(gray.width), intrinsics: K, pose: pose) {
-                // The picture has the edge sharper than the LiDAR.
-                lidar = sharp
-                fit = lidar
-            }
-            guard let fit else { return SpaceResult(advice: advice) }
-            return SpaceResult(object: fit, world: fit.outlineWorld, advice: advice)
-        case .pipe:
-            guard let fit = fitCylinder(cloud.points, aim: aim, reach: 0.06) else { return SpaceResult(advice: darkAdvice) }
-            // The pipe's outline as seen: 4 cm along the axis, its radius to each side.
-            let across = vnormalized(vcross(fit.axis, pose.z))
-            let r = fit.diameter / 2000
-            let a = fit.axis * 0.04
-            let c = fit.centre
-            // Seen only from the front, the diameter is a guess from a short arc.
-            let pipeAdvice = fit.coverage > 0 && fit.coverage < 70 ? "Ser lite av røret – gå litt til siden eller nærmere." : darkAdvice
-            return SpaceResult(pipe: fit, world: [c - a - across * r, c + a - across * r, c + a + across * r, c - a + across * r], advice: pipeAdvice)
-        default:
-            guard let s = surfaceNear(cloud.points, at: aim) else { return SpaceResult() }
-            // A 2 cm square on the surface.
-            let n = s.plane.normal
-            let seedDir = abs(n.x) < 0.9 ? V3(1, 0, 0) : V3(0, 1, 0)
-            let u = vnormalized(vcross(seedDir, n)) * 0.01
-            let v = vnormalized(vcross(n, u)) * 0.01
-            let p = s.point
-            return SpaceResult(surface: SurfaceHit(plane: s.plane, point: p), world: [p - u - v, p + u - v, p + u + v, p - u + v])
-        }
+        let fit = fitBox(cloud.points, aim: aim, right: right)
+        return SpaceResult(box: fit, world: fit?.corners ?? [], advice: darkAdvice)
     }
 }
 

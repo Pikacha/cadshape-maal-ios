@@ -50,110 +50,35 @@ enum BoxMake: String, CaseIterable, Identifiable, Codable {
         case .gridfinity, .lid: return [.clearance]
         }
     }
-}
-
-/// What to make for things lying on a table.
-enum ObjectMake: String, CaseIterable, Identifiable, Codable {
-    case tray, gridfinity
-    var id: String { rawValue }
-    var label: String { self == .tray ? "Brett med lomme" : "Gridfinity-boks med lomme" }
-    var short: String { self == .tray ? "Brett" : "Gridfinity" }
-    var symbol: String { self == .tray ? "rectangle.inset.filled" : "square.grid.3x3.square" }
-    var hint: String {
-        self == .tray
-            ? "Lommer med tingenes form, og et grep så du får tak i dem – til skuffen eller verktøyveggen"
-            : "Gridfinity-boks med lommene skåret ut og stablekant – står i bunnplaten"
-    }
-    var uses: [SpaceParam] { self == .tray ? [.clearanceObject, .depth, .rim, .notch] : [.clearanceObject, .depth, .notch] }
-}
-
-/// What to make for a pipe or rod.
-enum PipeMake: String, CaseIterable, Identifiable, Codable {
-    case clamp, adapter, cap
-    var id: String { rawValue }
-    var label: String {
+    /// The choices the panel offers. `grid` and `lid` stay in the enum so older saved
+    /// measurements still decode (and can be sent as they were).
+    static let offered: [BoxMake] = [.dividers, .insert, .gridfinity]
+    /// The word in the segmented choice.
+    var choice: String {
         switch self {
-        case .clamp: return "Rørklemme"
-        case .adapter: return "Overgang"
-        case .cap: return "Endelokk"
+        case .dividers, .grid: return "Skillevegger"
+        case .insert: return "Innsats"
+        case .gridfinity: return "Gridfinity"
+        case .lid: return "Lokk"
         }
     }
-    var symbol: String {
-        switch self {
-        case .clamp: return "rectangle.and.hand.point.up.left"
-        case .adapter: return "arrow.left.and.right.circle"
-        case .cap: return "capsule.portrait"
-        }
-    }
-    var hint: String {
-        switch self {
-        case .clamp: return "Omega-klemme med to skruer, klemmer røret litt"
-        case .adapter: return "Muffe mellom to rørstørrelser – mål den andre diameteren også"
-        case .cap: return "Kopp som tres over enden av røret"
-        }
-    }
-    var uses: [SpaceParam] { self == .clamp ? [] : [.pipeClearance, .pipeWall, .pipeLength] }
-}
-
-/// What to fill a gap with.
-enum GapMake: String, CaseIterable, Identifiable, Codable {
-    case shim, wedge, set
-    var id: String { rawValue }
-    var label: String {
-        switch self {
-        case .shim: return "Mellomlegg"
-        case .wedge: return "Kile"
-        case .set: return "Prøvesett"
-        }
-    }
-    var symbol: String {
-        switch self {
-        case .shim: return "rectangle.compress.vertical"
-        case .wedge: return "triangle"
-        case .set: return "square.stack.3d.up"
-        }
-    }
-    var hint: String {
-        switch self {
-        case .shim: return "Flat plate like tykk som spalten"
-        case .wedge: return "Kile med den målte vinkelen – spalten er tykkelsen på midten"
-        case .set: return "Fem mellomlegg med 0,5 mm mellom, så du kan prøve deg fram"
-        }
-    }
-    var uses: [SpaceParam] { [.gapLength, .gapWidth] }
+    /// Whether the room count matters for this make.
+    var hasRooms: Bool { uses.contains(.cols) }
 }
 
 /// A number to set for the parts (key as on the server).
 enum SpaceParam: String, CaseIterable, Identifiable {
-    case cols, rows, height, thickness, clearance, clearanceObject, depth, rim, notch
-    case pipeClearance, pipeWall, pipeLength, gapLength, gapWidth
+    case cols, rows, height, thickness, clearance
     var id: String { rawValue }
-    /// The key the server knows.
-    var key: String {
-        switch self {
-        case .clearanceObject, .pipeClearance: return "clearance"
-        case .pipeWall: return "wall"
-        case .pipeLength, .gapLength: return "length"
-        case .gapWidth: return "width"
-        default: return rawValue
-        }
-    }
+    /// The key the server knows (src/core/measured-box.ts sanitizeBoxParams).
+    var key: String { rawValue }
     var label: String {
         switch self {
-        case .cols: return "Rom i bredden"
-        case .rows: return "Rom i lengden"
+        case .cols: return "På tvers"
+        case .rows: return "På langs"
         case .height: return "Høyde"
         case .thickness: return "Veggtykkelse"
         case .clearance: return "Klaring mot veggene"
-        case .clearanceObject: return "Klaring rundt"
-        case .depth: return "Dybde på lommen"
-        case .rim: return "Kant rundt"
-        case .notch: return "Grep for fingeren"
-        case .pipeClearance: return "Klaring rundt røret"
-        case .pipeWall: return "Veggtykkelse"
-        case .pipeLength: return "Lengde over røret"
-        case .gapLength: return "Lengde"
-        case .gapWidth: return "Bredde"
         }
     }
     var range: ClosedRange<Double> {
@@ -161,57 +86,33 @@ enum SpaceParam: String, CaseIterable, Identifiable {
         case .cols, .rows: return 1...12
         case .height: return 0...400
         case .thickness: return 0.8...5
-        case .clearance, .clearanceObject: return 0...5
-        case .depth: return 0...200
-        case .rim: return 1.2...40
-        case .notch: return 0...1
-        case .pipeClearance: return 0...3
-        case .pipeWall: return 1.2...10
-        case .pipeLength: return 5...150
-        case .gapLength, .gapWidth: return 5...200
+        case .clearance: return 0...5
         }
     }
     var step: Double {
         switch self {
-        case .cols, .rows, .height, .depth, .rim, .notch, .pipeLength, .gapLength, .gapWidth: return 1
+        case .cols, .rows, .height: return 1
         case .thickness: return 0.2
-        case .clearance, .clearanceObject, .pipeClearance: return 0.1
-        case .pipeWall: return 0.4
+        case .clearance: return 0.1
         }
     }
     var defaultValue: Double {
         switch self {
         case .cols: return 3
         case .rows: return 2
-        case .height, .depth: return 0
+        case .height: return 0
         case .thickness: return 1.6
         case .clearance: return 0.5
-        case .clearanceObject: return 1
-        case .rim: return 6
-        case .notch: return 1
-        case .pipeClearance: return 0.3
-        case .pipeWall: return 2.4
-        case .pipeLength: return 25
-        case .gapLength: return 60
-        case .gapWidth: return 30
         }
     }
-    /// Whole numbers without a unit (rooms), a switch (notch), or mm.
+    /// Whole numbers without a unit (rooms), or mm.
     var isCount: Bool { self == .cols || self == .rows }
-    var isSwitch: Bool { self == .notch }
     /// What 0 means.
-    var zeroText: String? { self == .height || self == .depth ? "auto" : nil }
+    var zeroText: String? { self == .height ? "auto" : nil }
 }
 
 /// Gridfinity bins to fill a drawer with (grid units; 0 × 0 = none).
 let binSizes: [(x: Int, y: Int)] = [(0, 0), (1, 1), (2, 1), (2, 2), (3, 1), (3, 2)]
-
-/// Common outside diameters (as STANDARD_PIPES on the server).
-let standardPipes: [Double] = [6, 8, 10, 12, 15, 16, 18, 20, 22, 25, 28, 32, 35, 40, 42, 50, 54, 63, 75, 90, 110, 125, 160]
-
-func nearPipes(_ d: Double) -> [Double] {
-    standardPipes.filter { abs($0 - d) <= $0 * 0.04 }.sorted { abs($0 - d) < abs($1 - d) }
-}
 
 /// One measuring step's result, for the steady check and the lock.
 private struct BoxSample {
@@ -221,25 +122,16 @@ private struct BoxSample {
     var wall: Double?
 }
 
-/// A surface found round the cross-hair (gap mode).
-struct SurfaceHit {
-    var plane: Plane
-    var point: V3
-}
 
-/// Measuring with the LiDAR point cloud (many frames together): the inside of a box, things on a
-/// table, a pipe, or the gap between two surfaces – and what to make from it. The camera view feeds
-/// `update`; the PC gets the parts on «Lag».
+/// Measuring the inside of a box or drawer with the LiDAR point cloud (many frames together), and
+/// what to make for it. The camera view feeds `update`; the PC gets the parts on «Lag».
 final class SpaceModel: ObservableObject {
     // Live
     @Published var box: BoxFit?
-    @Published var object: ObjectFit?
-    @Published var pipe: CylinderFit?
-    @Published var surface: SurfaceHit?
-    /// The box's floor, the object's footprint, the pipe's outline or the surface, on screen.
+    /// The box's floor on screen.
     @Published var polygonOnScreen: [CGPoint] = []
     @Published var steadiness = 0.0
-    /// Why this measurement may be poor right now (dark surface, thin thing, little of a pipe seen).
+    /// Why this measurement may be poor right now (dark or glossy surface).
     @Published var advice: String? { didSet { if let a = advice, a != oldValue { applog("LiDAR", a) } } }
     @Published var hint = "" { didSet { if hint != oldValue { applog("LiDAR", hint) } } }
 
@@ -247,19 +139,7 @@ final class SpaceModel: ObservableObject {
     @Published var locked = false
     @Published var manual = false
     @Published var boxOut = BoxOut(width: 150, length: 100, height: 50, wall: nil)
-    @Published var objectOut: ObjectOut?
-    /// Things already in the tray, before the current one.
-    @Published var objectsBefore: [ObjectOut] = []
-    @Published var pipeOut = PipeOut(diameter: 32, second: nil)
-    /// Measuring the pipe's second diameter (for an adapter).
-    @Published var measuringSecond = false
-    /// Gap mode: the first surface, once chosen.
-    @Published var firstSurface: SurfaceHit?
-    @Published var gapOut = GapOut(gap: 5, angle: 0)
     @Published var boxMake: BoxMake = .dividers
-    @Published var objectMake: ObjectMake = .tray
-    @Published var pipeMake: PipeMake = .clamp
-    @Published var gapMake: GapMake = .shim
     @Published var bins = 2
     @Published var values: [SpaceParam: Double] = Dictionary(uniqueKeysWithValues: SpaceParam.allCases.map { ($0, $0.defaultValue) })
     @Published var spread: Double?
@@ -273,32 +153,21 @@ final class SpaceModel: ObservableObject {
 
     weak var owner: MeasureModel?
     private var boxes: [BoxSample] = []
-    private var objects: [ObjectFit] = []
-    private var diameters: [Double] = []
-    private var surfaces: [SurfaceHit] = []
     private var steadySince: Date?
     private var savedId: UUID?
+    /// Frames in a row without a fit.
+    private var misses = 0
     private let haptic = UINotificationFeedbackGenerator()
-    private let tap = UIImpactFeedbackGenerator(style: .medium)
-
-    var mode: MeasureMode { owner?.mode ?? .box }
-    var isBox: Bool { mode == .box }
 
     // MARK: Live
 
-    /// Back to measuring, keeping the things already in the tray and the pipe's first diameter.
+    /// Back to measuring.
     private func resetLive() {
         generation += 1
         box = nil
-        object = nil
-        pipe = nil
-        surface = nil
         polygonOnScreen = []
         steadiness = 0
         boxes = []
-        objects = []
-        diameters = []
-        surfaces = []
         misses = 0
         advice = nil
         steadySince = nil
@@ -318,24 +187,11 @@ final class SpaceModel: ObservableObject {
 
     func reset() {
         resetLive()
-        objectOut = nil
-        objectsBefore = []
-        measuringSecond = false
-        firstSurface = nil
         spread = nil
         savedId = nil
-        hint = startHint
     }
 
-    private var startHint: String {
-        switch mode {
-        case .box: return "Hold telefonen over boksen og sikt krysset på bunnen"
-        case .object: return objectsBefore.isEmpty ? "Legg tingen på et bord og sikt krysset på den" : "Sikt på neste ting"
-        case .pipe: return measuringSecond ? "Sikt på det andre røret, fra siden" : "Sikt på røret fra siden, 25–50 cm unna"
-        case .gap: return firstSurface == nil ? "Sikt på den første flaten og trykk «Flate 1»" : "Sikt på den andre flaten og trykk «Flate 2»"
-        default: return ""
-        }
-    }
+    private var startHint: String { "Hold telefonen over boksen og sikt krysset på bunnen" }
 
     /// A new fit from the camera (main thread).
     func update(box fit: BoxFit?, screen: [CGPoint]) {
@@ -368,72 +224,6 @@ final class SpaceModel: ObservableObject {
         checkAuto(ready: fit.allWallsSeen && fit.height != nil)
     }
 
-    func update(object fit: ObjectFit?, screen: [CGPoint]) {
-        guard !locked else { return }
-        object = fit
-        polygonOnScreen = screen
-        guard let fit else {
-            lost("Finner ikke tingen. Legg den på et ryddig bord og sikt krysset midt på den, 25–50 cm over.")
-            return
-        }
-        misses = 0
-        objects.append(fit)
-        if objects.count > 8 { objects.removeFirst(objects.count - 8) }
-        // Sorted sides: turning the phone a little must not swap width and length.
-        steadiness = agreement([objects.map { max($0.width, $0.length) }, objects.map { min($0.width, $0.length) }], absMM: 1.5, relative: 0.01)
-        hint = steadyHint
-        checkAuto(ready: true)
-    }
-
-    func update(pipe fit: CylinderFit?, screen: [CGPoint]) {
-        guard !locked else { return }
-        pipe = fit
-        polygonOnScreen = screen
-        guard let fit else {
-            lost("Finner ikke noe rundt i krysset. Sikt midt på røret fra siden, med litt luft bak det.")
-            return
-        }
-        misses = 0
-        diameters.append(fit.diameter)
-        if diameters.count > 8 { diameters.removeFirst(diameters.count - 8) }
-        steadiness = agreement([diameters], absMM: 0.5, relative: 0.01)
-        if fit.coverage > 0 && fit.coverage < 70 {
-            hint = "Ser bare forsiden. Gå rundt røret – eller bruk «Skann en ting» for flasker og små ting."
-        } else {
-            hint = fit.residual > 2 ? "Ujevn flate – er det et rør? Gå litt nærmere." : steadyHint
-        }
-        // A short arc (seen only from the front) can be any diameter: not locked by itself.
-        checkAuto(ready: fit.residual <= 2 && (fit.coverage == 0 || fit.coverage >= 70))
-    }
-
-    func update(surface hit: SurfaceHit?, screen: [CGPoint]) {
-        guard !locked else { return }
-        surface = hit
-        polygonOnScreen = screen
-        guard let hit else {
-            lost("Finner ingen flate i krysset. Gå litt nærmere.")
-            return
-        }
-        misses = 0
-        surfaces.append(hit)
-        if surfaces.count > 6 { surfaces.removeFirst(surfaces.count - 6) }
-        // Steady = enough hits whose planes agree (normals within ~1°, positions within ~1 mm).
-        var worstAngle = 0.0, worstOffset = 0.0
-        if let ref = surfaces.first {
-            for s in surfaces {
-                let d = abs(vdotApp(s.plane.normal, ref.plane.normal))
-                worstAngle = max(worstAngle, acos(min(1, d)) * 180 / .pi)
-                worstOffset = max(worstOffset, abs(vdotApp(ref.plane.normal, s.point - ref.point)) * 1000)
-            }
-        }
-        let agree = max(0, 1 - max(worstAngle / 2, worstOffset / 3))
-        steadiness = min(1, Double(surfaces.count) / 4) * agree
-        hint = startHint
-    }
-
-    /// Frames in a row without a fit.
-    private var misses = 0
-
     private func lost(_ text: String) {
         // One frame without a fit (an edge at the picture border, a blurry frame) must not throw
         // away what has been measured: only a few in a row do.
@@ -444,9 +234,6 @@ final class SpaceModel: ObservableObject {
             return
         }
         boxes.removeAll()
-        objects.removeAll()
-        diameters.removeAll()
-        surfaces.removeAll()
         steadiness = 0
         steadySince = nil
         hint = text
@@ -500,51 +287,19 @@ final class SpaceModel: ObservableObject {
         }
     }
 
-    var canLock: Bool {
-        switch mode {
-        case .box: return !boxes.isEmpty
-        case .object: return !objects.isEmpty
-        case .pipe: return !diameters.isEmpty
-        default: return false
-        }
-    }
+    var canLock: Bool { !boxes.isEmpty }
 
     // MARK: Locking
 
     func lock() {
-        switch mode {
-        case .box:
-            guard !boxes.isEmpty else { return }
-            boxOut = BoxOut(
-                width: median(boxes.map(\.width)),
-                length: median(boxes.map(\.length)),
-                height: boxes.compactMap(\.height).isEmpty ? 0 : median(boxes.compactMap(\.height)),
-                wall: boxes.compactMap(\.wall).isEmpty ? nil : median(boxes.compactMap(\.wall))
-            )
-            spread = box?.spread
-        case .object:
-            // The frame whose size is nearest the middle of the last ones.
-            guard !objects.isEmpty else { return }
-            let mw = median(objects.map(\.width)), ml = median(objects.map(\.length))
-            guard let best = objects.min(by: { abs($0.width - mw) + abs($0.length - ml) < abs($1.width - mw) + abs($1.length - ml) }) else { return }
-            objectOut = ObjectOut(outline: best.outline.map { [$0.x, $0.y] }, width: best.width, length: best.length, height: median(objects.map(\.height)))
-            // What the frames actually varied by, never less than the method can do.
-            let madW = median(objects.map { abs($0.width - mw) }), madL = median(objects.map { abs($0.length - ml) })
-            spread = max(best.sharpened ? 0.7 : 2, 1.5 * max(madW, madL))
-        case .pipe:
-            guard !diameters.isEmpty else { return }
-            let d = (median(diameters) * 10).rounded() / 10
-            if measuringSecond {
-                pipeOut.second = d
-                pipeMake = .adapter
-            } else {
-                pipeOut = PipeOut(diameter: d, second: nil)
-            }
-            measuringSecond = false
-            spread = max(0.5, (pipe?.residual ?? 1) * 1.5)
-        default:
-            return
-        }
+        guard !boxes.isEmpty else { return }
+        boxOut = BoxOut(
+            width: median(boxes.map(\.width)),
+            length: median(boxes.map(\.length)),
+            height: boxes.compactMap(\.height).isEmpty ? 0 : median(boxes.compactMap(\.height)),
+            wall: boxes.compactMap(\.wall).isEmpty ? nil : median(boxes.compactMap(\.wall))
+        )
+        spread = box?.spread
         haptic.notificationOccurred(.success)
         locked = true
         manual = false
@@ -556,81 +311,9 @@ final class SpaceModel: ObservableObject {
         save(picture: picture)
     }
 
-    /// Gap mode: the surface in the cross-hair is the first (then the second, which locks).
-    /// The last surface hits together: normals turned the same way and averaged, points averaged.
-    /// One frame's plane wobbles a few degrees; the average of up to six is much steadier.
-    private func averagedSurface() -> SurfaceHit? {
-        guard let first = surfaces.first else { return nil }
-        var n = V3(0, 0, 0), p = V3(0, 0, 0)
-        for s in surfaces {
-            let sign: Double = vdotApp(s.plane.normal, first.plane.normal) < 0 ? -1 : 1
-            n += s.plane.normal * sign
-            p += s.point
-        }
-        let len = (n.x * n.x + n.y * n.y + n.z * n.z).squareRoot()
-        guard len > 1e-9 else { return surfaces.last }
-        let normal = n / len
-        let point = p / Double(surfaces.count)
-        return SurfaceHit(plane: Plane(normal: normal, offset: vdotApp(normal, point)), point: point)
-    }
-
-    private func vdotApp(_ a: V3, _ b: V3) -> Double { a.x * b.x + a.y * b.y + a.z * b.z }
-
-    func takeSurface() {
-        guard let hit = averagedSurface() else { return }
-        tap.impactOccurred()
-        guard let first = firstSurface else {
-            firstSurface = hit
-            surfaces = []
-            steadiness = 0
-            hint = startHint
-            return
-        }
-        let g = gapBetween((first.plane, first.point), (hit.plane, hit.point))
-        // The same surface twice is not a gap.
-        if g.gapMM < 0.5 {
-            haptic.notificationOccurred(.warning)
-            surfaces = []
-            steadiness = 0
-            hint = "Det var samme flate. Sikt på den andre flaten og trykk «Flate 2»."
-            return
-        }
-        gapOut = GapOut(gap: g.gapMM, angle: g.angle)
-        if g.angle >= 2 { gapMake = .wedge }
-        spread = 1.5
-        haptic.notificationOccurred(.success)
-        locked = true
-        manual = false
-        done = nil
-        error = nil
-        // LiDAR cannot tell a 2 mm gap from 0: say so instead of a confident number.
-        notes = g.gapMM < 3 ? ["Under 3 mm måler LiDAR dårlig – mål spalten med søkerblad eller skyvelære og skriv den inn."] : []
-        let picture = owner?.snapshot?()
-        owner?.pauseCamera?()
-        save(picture: picture)
-    }
-
-    var canTakeSurface: Bool { surface != nil && !surfaces.isEmpty }
-
     /// No LiDAR, or measured with a ruler: type the sizes.
     func typeIn() {
-        switch mode {
-        case .box:
-            if let b = box { boxOut = BoxOut(width: b.width, length: b.length, height: b.height ?? 50, wall: b.wall) }
-        case .pipe:
-            if measuringSecond {
-                // Typing in the second pipe: keep the first one, the live value is only a start.
-                pipeOut.second = pipe?.diameter ?? pipeOut.second ?? pipeOut.diameter
-                pipeMake = .adapter
-                measuringSecond = false
-            } else if let p = pipe {
-                pipeOut = PipeOut(diameter: p.diameter, second: nil)
-            }
-        case .gap:
-            break
-        default:
-            return
-        }
+        if let b = box { boxOut = BoxOut(width: b.width, length: b.length, height: b.height ?? 50, wall: b.wall) }
         locked = true
         manual = true
         spread = nil
@@ -643,33 +326,6 @@ final class SpaceModel: ObservableObject {
 
     func measureAgain() {
         reset()
-        owner?.resumeCamera?()
-    }
-
-    /// Another thing for the same tray: the one just measured stays, measure the next.
-    func addAnotherObject() {
-        guard let o = objectOut else { return }
-        objectsBefore.append(o)
-        objectOut = nil
-        resetLive()
-        owner?.resumeCamera?()
-    }
-
-    func removeObject(at i: Int) {
-        var all = allObjects
-        guard all.indices.contains(i) else { return }
-        all.remove(at: i)
-        objectOut = all.last
-        objectsBefore = Array(all.dropLast())
-        changed()
-    }
-
-    var allObjects: [ObjectOut] { objectsBefore + (objectOut.map { [$0] } ?? []) }
-
-    /// Pipe: measure the second diameter (for an adapter).
-    func measureSecond() {
-        measuringSecond = true
-        resetLive()
         owner?.resumeCamera?()
     }
 
@@ -688,35 +344,8 @@ final class SpaceModel: ObservableObject {
         changed()
     }
 
-    func setPipe(diameter: Double? = nil, second: Double? = nil) {
-        if let diameter { pipeOut.diameter = max(2, min(300, diameter)) }
-        if let second { pipeOut.second = max(2, min(300, second)) }
-        changed()
-    }
-
-    func setGap(_ gap: Double? = nil, angle: Double? = nil) {
-        if let gap { gapOut.gap = max(0.2, min(200, gap)) }
-        if let angle { gapOut.angle = max(0, min(45, angle)) }
-        changed()
-    }
-
     func setBoxMake(_ m: BoxMake) {
         boxMake = m
-        changed()
-    }
-
-    func setObjectMake(_ m: ObjectMake) {
-        objectMake = m
-        changed()
-    }
-
-    func setPipeMake(_ m: PipeMake) {
-        pipeMake = m
-        changed()
-    }
-
-    func setGapMake(_ m: GapMake) {
-        gapMake = m
         changed()
     }
 
@@ -730,73 +359,28 @@ final class SpaceModel: ObservableObject {
         notes = []
         guard let id = savedId else { return }
         let params = paramsJSON()
-        let mode = self.mode
-        let box = boxOut, boxMake = self.boxMake, objectMake = self.objectMake
-        let objects = allObjects
-        let pipe = pipeOut, pipeMake = self.pipeMake, gap = gapOut, gapMake = self.gapMake
+        let box = boxOut, boxMake = self.boxMake
         owner?.store.update(id) {
-            switch mode {
-            case .box:
-                $0.box = box
-                $0.boxMake = boxMake
-                $0.text = Self.text(box)
-            case .object:
-                $0.object = objects.first
-                $0.objects = objects.count > 1 ? objects : nil
-                $0.objectMake = objectMake
-                $0.text = Self.text(objects)
-            case .pipe:
-                $0.pipe = pipe
-                $0.pipeMake = pipeMake
-                $0.text = Self.text(pipe)
-            case .gap:
-                $0.gap = gap
-                $0.gapMake = gapMake
-                $0.text = Self.text(gap)
-            default:
-                break
-            }
+            $0.box = box
+            $0.boxMake = boxMake
+            $0.text = Self.text(box)
             $0.spaceParams = params
         }
     }
 
     func paramsJSON() -> [String: Double] {
         var out: [String: Double] = [:]
-        let uses: [SpaceParam]
-        switch mode {
-        case .box: uses = boxMake.uses
-        case .object: uses = objectMake.uses
-        case .pipe: uses = pipeMake.uses
-        case .gap: uses = gapMake.uses
-        default: uses = []
-        }
-        for p in uses { out[p.key] = values[p] ?? p.defaultValue }
-        if mode == .box {
-            out["cols"] = values[.cols] ?? 3
-            out["rows"] = values[.rows] ?? 2
-            let b = binSizes[min(max(0, bins), binSizes.count - 1)]
-            out["binx"] = Double(b.x)
-            out["biny"] = Double(b.y)
-        }
+        for p in boxMake.uses { out[p.key] = values[p] ?? p.defaultValue }
+        out["cols"] = values[.cols] ?? 3
+        out["rows"] = values[.rows] ?? 2
+        let b = binSizes[min(max(0, bins), binSizes.count - 1)]
+        out["binx"] = Double(b.x)
+        out["biny"] = Double(b.y)
         return out
     }
 
     static func text(_ b: BoxOut) -> String {
         "Boks \(mm(b.width)) × \(mm(b.length))" + (b.height > 0 ? " × \(mm(b.height))" : "") + " mm"
-    }
-
-    static func text(_ list: [ObjectOut]) -> String {
-        guard let o = list.first else { return "Gjenstand" }
-        if list.count > 1 { return "\(list.count) ting: " + list.map { "\(mm($0.width, digits: 0)) × \(mm($0.length, digits: 0))" }.joined(separator: ", ") + " mm" }
-        return "Gjenstand \(mm(o.width)) × \(mm(o.length)) mm, \(mm(o.height)) mm høy"
-    }
-
-    static func text(_ p: PipeOut) -> String {
-        "Rør Ø \(mm(p.diameter))" + (p.second.map { " og Ø \(mm($0))" } ?? "") + " mm"
-    }
-
-    static func text(_ g: GapOut) -> String {
-        "Spalte \(mm(g.gap)) mm" + (g.angle >= 0.5 ? ", \(mm(g.angle))° skjev" : "")
     }
 
     /// The height the dividers or insert get when «auto» (as the server: 80 % / 1 mm under the rim).
@@ -809,93 +393,25 @@ final class SpaceModel: ObservableObject {
 
     private func save(picture: UIImage?) {
         guard let store = owner?.store else { return }
-        let params = paramsJSON()
-        // More things for the same tray: the saved measurement grows.
-        if mode == .object, let id = savedId, !objectsBefore.isEmpty {
-            let objects = allObjects
-            store.update(id) {
-                $0.object = objects.first
-                $0.objects = objects
-                $0.text = Self.text(objects)
-            }
-            return
-        }
-        switch mode {
-        case .box:
-            savedId = store.add(SavedMeasurement(box: boxOut, boxMake: boxMake, spaceParams: params, text: Self.text(boxOut), uncertainty: spread), image: picture)
-        case .object:
-            if let o = objectOut {
-                savedId = store.add(SavedMeasurement(object: o, objectMake: objectMake, spaceParams: params, text: Self.text([o]), uncertainty: spread), image: picture)
-            }
-        case .pipe:
-            if let id = savedId, pipeOut.second != nil {
-                let pipe = pipeOut
-                store.update(id) {
-                    $0.pipe = pipe
-                    $0.pipeMake = .adapter
-                    $0.text = Self.text(pipe)
-                }
-            } else {
-                savedId = store.add(SavedMeasurement(pipe: pipeOut, pipeMake: pipeMake, spaceParams: params, text: Self.text(pipeOut), uncertainty: spread), image: picture)
-            }
-        case .gap:
-            savedId = store.add(SavedMeasurement(gap: gapOut, gapMake: gapMake, spaceParams: params, text: Self.text(gapOut), uncertainty: spread), image: picture)
-        default:
-            break
-        }
+        savedId = store.add(SavedMeasurement(box: boxOut, boxMake: boxMake, spaceParams: paramsJSON(), text: Self.text(boxOut), uncertainty: spread), image: picture)
     }
 
     /// What goes to the server for a measurement (also for one kept on the phone).
     static func body(_ m: SavedMeasurement) -> [String: Any]? {
-        let params = m.spaceParams ?? [:]
-        if let box = m.box { return ["type": "box", "box": box.json, "make": (m.boxMake ?? .dividers).rawValue, "params": params] }
-        if let object = m.object {
-            let list = m.objects ?? [object]
-            return ["type": "object", "objects": list.map(\.json), "make": (m.objectMake ?? .tray).rawValue, "params": params]
-        }
-        if let pipe = m.pipe { return ["type": "pipe", "pipe": pipe.json, "make": (m.pipeMake ?? .clamp).rawValue, "params": params] }
-        if let gap = m.gap { return ["type": "gap", "gap": gap.json, "make": (m.gapMake ?? .shim).rawValue, "params": params] }
-        return nil
+        guard let box = m.box else { return nil }
+        return ["type": "box", "box": box.json, "make": (m.boxMake ?? .dividers).rawValue, "params": m.spaceParams ?? [:]]
     }
 
-    private var currentBody: [String: Any]? {
-        let params = paramsJSON()
-        switch mode {
-        case .box: return ["type": "box", "box": boxOut.json, "make": boxMake.rawValue, "params": params]
-        case .object:
-            let list = allObjects
-            return list.isEmpty ? nil : ["type": "object", "objects": list.map(\.json), "make": objectMake.rawValue, "params": params]
-        case .pipe: return ["type": "pipe", "pipe": pipeOut.json, "make": pipeMake.rawValue, "params": params]
-        case .gap: return ["type": "gap", "gap": gapOut.json, "make": gapMake.rawValue, "params": params]
-        default: return nil
-        }
-    }
-
-    var currentLabel: String {
-        switch mode {
-        case .box: return boxMake.label
-        case .object: return objectMake.label
-        case .pipe: return pipeMake.label
-        case .gap: return gapMake.label
-        default: return "Delen"
-        }
+    private var currentBody: [String: Any] {
+        ["type": "box", "box": boxOut.json, "make": boxMake.rawValue, "params": paramsJSON()]
     }
 
     func commit() {
         guard let owner else { return }
-        if owner.isDemo {
-            done = "\(currentLabel) er laget i CadSHAPE (demo)."
-            return
-        }
-        if mode == .pipe && pipeMake == .adapter && pipeOut.second == nil {
-            error = "Mål den andre diameteren først (eller skriv den inn)."
-            return
-        }
-        guard let body = currentBody else { return }
         let saved = savedId.flatMap { id in owner.store.items.first { $0.id == id } }
         working = true
         error = nil
-        owner.sendSpace(body, photo: saved.flatMap { owner.store.photoData($0) }) { [weak self] r in
+        owner.sendSpace(currentBody, photo: saved.flatMap { owner.store.photoData($0) }) { [weak self] r in
             guard let self else { return }
             self.working = false
             switch r {
