@@ -104,6 +104,65 @@ final class ScanShapesTests: XCTestCase {
         XCTAssertEqual(s.parts[0].corner, 5, accuracy: 1.2)
     }
 
+    // Shared rules: the same scenes as «Finn målene» med felles regler in tests/scanshapes.test.ts.
+    private func cyl(_ d: Double, _ z0: Double, _ z1: Double, _ spread: Double) -> ScanPart {
+        ScanPart(kind: .cylinder, z0: z0, z1: z1, d: d, spread: spread)
+    }
+
+    private func box(_ w: Double, _ l: Double, _ angle: Double, _ z0: Double, _ z1: Double, _ spread: Double) -> ScanPart {
+        ScanPart(kind: .box, z0: z0, z1: z1, w: w, l: l, angle: angle, spread: spread)
+    }
+
+    func testEqualCylindersGetOneDiameter() {
+        let out = sharedRules([cyl(37.2, 0, 20, 0.3), cyl(24, 20, 36, 0.1), cyl(37.6, 36, 56, 0.3)])
+        XCTAssertEqual(out[0].d, 37.4, accuracy: 0.005)
+        XCTAssertEqual(out[2].d, 37.4, accuracy: 0.005)
+        XCTAssertEqual(out[1].d, 24)
+        // Two equal parts: ± shrinks by √2.
+        XCTAssertEqual(out[0].spread, 0.3 / 2.0.squareRoot(), accuracy: 0.0005)
+        XCTAssertEqual(out[0].rules, ["lik diameter som del 3"])
+        XCTAssertEqual(out[2].rules, ["lik diameter som del 1"])
+        XCTAssertEqual(out[1].rules, [])
+    }
+
+    func testDifferentCylindersStayAsMeasured() {
+        let out = sharedRules([cyl(38, 0, 20, 0.3), cyl(40, 20, 40, 0.3)])
+        XCTAssertEqual(out.map(\.d), [38, 40])
+        XCTAssertTrue(out.allSatisfy { $0.rules.isEmpty })
+        XCTAssertEqual(out[0].spread, 0.3)
+    }
+
+    func testStackedBoxesShareSidesAndAngle() {
+        let out = sharedRules([box(60.2, 30, 30, 0, 10, 0.3), box(59.8, 30.4, 31.5, 10, 20, 0.3),
+                               box(40, 20, -59, 20, 30, 0.3), box(25, 15, 40, 30, 40, 0.3)])
+        XCTAssertEqual(out[0].w, 60, accuracy: 0.005)
+        XCTAssertEqual(out[1].w, 60, accuracy: 0.005)
+        XCTAssertEqual(out[0].l, 30.2, accuracy: 0.005)
+        XCTAssertEqual(out[1].l, 30.2, accuracy: 0.005)
+        XCTAssertEqual(out[0].spread, 0.3 / 2.0.squareRoot(), accuracy: 0.0005)
+        XCTAssertEqual(out[0].angle, 30.83, accuracy: 0.05)
+        XCTAssertEqual(out[1].angle, 30.83, accuracy: 0.05)
+        XCTAssertEqual(out[2].angle, -59.17, accuracy: 0.05)
+        XCTAssertEqual(out[0].rules, ["lik lengde som del 2", "lik bredde som del 2", "parallell med del 2", "rett vinkel på del 3"])
+        XCTAssertEqual(out[2].rules, ["rett vinkel på del 1 og 2"])
+        XCTAssertEqual(out[2].w, 40)
+        XCTAssertEqual(out[2].spread, 0.3)
+        // 10° off is a real turn, not noise.
+        XCTAssertEqual(out[3].angle, 40)
+        XCTAssertEqual(out[3].rules, [])
+    }
+
+    func testScannedSpoolEndsGetOneDiameter() throws {
+        let spool = lathe([(0, 0), (18.7, 0), (18.7, 20), (12, 20), (12, 36), (18.7, 36), (18.7, 56), (0, 56)], noise: 0.25)
+        let s = try XCTUnwrap(fitScanShapes(spool))
+        XCTAssertEqual(s.parts.map(\.kind), [.cylinder, .cylinder, .cylinder])
+        XCTAssertEqual(s.parts[0].d, s.parts[2].d)
+        XCTAssertEqual(s.parts[0].d, 37.4, accuracy: 0.6)
+        XCTAssertEqual(s.parts[1].d, 24, accuracy: 0.6)
+        XCTAssertEqual(s.parts[0].rules, ["lik diameter som del 3"])
+        XCTAssertEqual(s.parts[1].rules, [])
+    }
+
     func testShortTextHasNorwegianComma() {
         XCTAssertEqual(shortMM(37.44), "37,4")
         XCTAssertEqual(shortMM(59.02), "59")

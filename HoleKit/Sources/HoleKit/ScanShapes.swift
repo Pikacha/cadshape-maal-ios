@@ -4,6 +4,7 @@ import Foundation
 // slice is a circle, a (rounded) rectangle or a free outline; slices that agree become one part.
 // A pill bottle → «Sylinder Ø38,8 × 17,5 · Sylinder Ø37,4 × 59». The same rules as CadSHAPE's
 // src/core/scanshapes.ts (upright stack only – CadSHAPE also tries lying down). Change both.
+// Last, shared rules (`sharedRules`): parts that measure the same within their noise get one value.
 
 public enum ScanPartKind: String {
     case cylinder, cone, box, profile
@@ -29,7 +30,11 @@ public struct ScanPart {
     public var points: Int = 0
     public var centre = P2(0, 0)
     /// How much the slices of this part disagree with its measures (mm, RMS) – green below 0,5.
+    /// After a shared rule: the ± of the shared value (smaller, the parts measured it together).
     public var spread: Double = 0
+    /// Shared rules that set a measure together with other parts, e.g. «lik diameter som del 3»
+    /// (parts counted from the bottom, 1 first). Empty: the part's own measures.
+    public var rules: [String] = []
 
     public var height: Double { z1 - z0 }
 
@@ -453,5 +458,155 @@ public func fitScanShapes(_ mesh: TriangleMesh) -> ScanShapes? {
             explained += (hi - lo) * 0.35
         }
     }
-    return ScanShapes(parts: parts, height: H, explained: explained / H)
+    return ScanShapes(parts: sharedRules(parts), height: H, explained: explained / H)
+}
+
+/// Smallest ± a measure is given in the shared rules (mm): half the 0,1 mm the phone shows.
+private let uncFloor = 0.05
+/// Boxes in one stack whose long sides are this close to parallel or square (degrees) share the angle.
+private let angleShare = 2.0
+
+/// One measure of one part: part index, value, weight (height) and ± (spread).
+private struct Measure {
+    var i: Int
+    var v: Double
+    var w: Double
+    var s: Double
+}
+
+/// Every pair within their combined ±, and the weighted mean within each one's own ± (no value
+/// moves more than its own uncertainty).
+private func groupOK(_ g: [Measure], _ together: (Measure, Measure) -> Bool) -> Bool {
+    let W = g.reduce(0.0) { $0 + $1.w }
+    if !(W > 0) { return false }
+    let m = g.reduce(0.0) { $0 + $1.w * $1.v } / W
+    for a in g {
+        let ua = max(a.s, uncFloor)
+        if abs(a.v - m) > ua + 1e-9 { return false }
+        for b in g {
+            let ub = max(b.s, uncFloor)
+            if abs(a.v - b.v) > (ua * ua + ub * ub).squareRoot() + 1e-9 || !together(a, b) { return false }
+        }
+    }
+    return true
+}
+
+/// Groups (two or more) of measures that are the same within their noise, smallest value first.
+private func equalGroups(_ ms: [Measure], together: (Measure, Measure) -> Bool = { _, _ in true }) -> [[Measure]] {
+    let sorted = ms.sorted { $0.v < $1.v || ($0.v == $1.v && $0.i < $1.i) }
+    var groups: [[Measure]] = []
+    var cur: [Measure] = []
+    for m in sorted {
+        if !cur.isEmpty && groupOK(cur + [m], together) {
+            cur.append(m)
+        } else {
+            if cur.count > 1 { groups.append(cur) }
+            cur = [m]
+        }
+    }
+    if cur.count > 1 { groups.append(cur) }
+    return groups
+}
+
+/// Weighted mean of a group, and its ± (the members' ± combined: two equal parts give ±/√2).
+private func combined(_ g: [Measure]) -> (value: Double, spread: Double) {
+    let W = g.reduce(0.0) { $0 + $1.w }
+    let value = g.reduce(0.0) { $0 + $1.w * $1.v } / W
+    let spread = g.reduce(0.0) { $0 + ($1.w * $1.s) * ($1.w * $1.s) }.squareRoot() / W
+    return (value, spread)
+}
+
+/// «1», «1 og 3», «1, 3 og 5».
+private func partNumbers(_ ns: [Int]) -> String {
+    let s = ns.sorted().map { String($0) }
+    guard let last = s.last else { return "" }
+    return s.count > 1 ? s.dropLast().joined(separator: ", ") + " og " + last : last
+}
+
+/// Shared rules (GlobFit): each part's numbers are noisy, but a thing is often made of equal parts.
+/// Parts that measure the same within their own ± get one value (weighted by height), and the ±
+/// shrinks. Cylinders on one axis: equal diameter. Boxes: equal long/short side, and long sides
+/// parallel or square within `angleShare`. The parts are counted from the bottom, 1 first.
+/// Nothing is snapped to the scan's own X axis or to round numbers. Same as `sharedRules` in
+/// src/core/scanshapes.ts.
+public func sharedRules(_ parts: [ScanPart]) -> [ScanPart] {
+    var out = parts
+    func others(_ g: [Measure], _ i: Int) -> String { partNumbers(g.filter { $0.i != i }.map { $0.i + 1 }) }
+    // Equal diameters: cylinders on one axis.
+    let diameters = parts.indices.filter { parts[$0].kind == .cylinder }
+        .map { Measure(i: $0, v: parts[$0].d, w: parts[$0].height, s: parts[$0].spread) }
+    let axis: (Measure, Measure) -> Bool = { a, b in
+        dist(parts[a.i].centre, parts[b.i].centre) <= max(1.5, 0.05 * max(a.v, b.v))
+    }
+    for g in equalGroups(diameters, together: axis) {
+        let c = combined(g)
+        for a in g {
+            out[a.i].d = c.value
+            out[a.i].spread = c.spread
+            out[a.i].rules.append("lik diameter som del " + others(g, a.i))
+        }
+    }
+    // Equal box sides (long side = «lengde», short side = «bredde», as in PartMeasure).
+    let boxes = parts.indices.filter { parts[$0].kind == .box }
+    var sw = parts.map(\.spread)
+    var sl = parts.map(\.spread)
+    var sized = [Bool](repeating: false, count: parts.count)
+    let widths = boxes.map { Measure(i: $0, v: parts[$0].w, w: parts[$0].height, s: parts[$0].spread) }
+    for g in equalGroups(widths) {
+        let c = combined(g)
+        for a in g {
+            out[a.i].w = c.value
+            sw[a.i] = c.spread
+            sized[a.i] = true
+            out[a.i].rules.append("lik lengde som del " + others(g, a.i))
+        }
+    }
+    let lengths = boxes.map { Measure(i: $0, v: parts[$0].l, w: parts[$0].height, s: parts[$0].spread) }
+    for g in equalGroups(lengths) {
+        let c = combined(g)
+        for a in g {
+            out[a.i].l = c.value
+            sl[a.i] = c.spread
+            sized[a.i] = true
+            out[a.i].rules.append("lik bredde som del " + others(g, a.i))
+        }
+    }
+    for i in boxes where sized[i] { out[i].spread = ((sw[i] * sw[i] + sl[i] * sl[i]) / 2).squareRoot() }
+    // Parallel or square: boxes whose long sides are within angleShare of 0° or 90° to each other.
+    func rel(_ a: Double, _ b: Double) -> Double {
+        let d = angleDiff(a, b)
+        return min(d, 90 - d)
+    }
+    func wrap(_ a: Double) -> Double {
+        var x = a
+        while x > 90 { x -= 180 }
+        while x <= -90 { x += 180 }
+        return x
+    }
+    var groups: [[Int]] = []
+    for i in boxes {
+        if let k = groups.firstIndex(where: { g in g.allSatisfy { rel(parts[i].angle, parts[$0].angle) <= angleShare } }) {
+            groups[k].append(i)
+        } else {
+            groups.append([i])
+        }
+    }
+    for g in groups where g.count > 1 {
+        let ref = parts[g[0]].angle
+        let off: [Double] = g.map { angleDiff(parts[$0].angle, ref) <= 45 ? 0.0 : 90.0 }
+        var sa = 0.0, sh = 0.0
+        for (k, i) in g.enumerated() {
+            sa += parts[i].height * (ref + wrap(parts[i].angle - off[k] - ref))
+            sh += parts[i].height
+        }
+        let m = sa / sh
+        for (k, i) in g.enumerated() {
+            out[i].angle = wrap(m + off[k])
+            let par = g.indices.filter { $0 != k && off[$0] == off[k] }.map { g[$0] + 1 }
+            let sq = g.indices.filter { $0 != k && off[$0] != off[k] }.map { g[$0] + 1 }
+            if !par.isEmpty { out[i].rules.append("parallell med del " + partNumbers(par)) }
+            if !sq.isEmpty { out[i].rules.append("rett vinkel på del " + partNumbers(sq)) }
+        }
+    }
+    return out
 }
