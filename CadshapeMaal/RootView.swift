@@ -80,6 +80,7 @@ struct HomeView: View {
                     tile("Inni boks", "Mål innsiden, lag skillevegger", "shippingbox", blueTint) { measure(.box) }
                 }
                 arTile
+                assistantTile
                 if let p = watch.printer, p.online {
                     PrinterRow(printer: p)
                 }
@@ -104,9 +105,37 @@ struct HomeView: View {
                 model.showConnect = false
             }
         }
+        .sheet(isPresented: $showAssistant) {
+            AssistantSheet(model: model, watch: watch, chat: chat)
+        }
     }
 
     @State private var scanQR = false
+    @State private var showAssistant = false
+    /// The conversation lives as long as the home screen, so closing the sheet keeps it.
+    @StateObject private var chat = AssistantModel()
+
+    /// Ask the assistant in CadSHAPE for a part, a change, a check or a print.
+    private var assistantTile: some View {
+        Button { showAssistant = true } label: {
+            HStack(spacing: 12) {
+                Image(systemName: "sparkles").font(.title2.weight(.semibold)).foregroundStyle(accent)
+                    .frame(width: 32)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Snakk med assistenten").font(.headline)
+                    Text(chat.busy ? "Jobber …" : "Be om en del, en sjekk eller en print").font(.subheadline).foregroundStyle(muted).lineLimit(1)
+                }
+                Spacer(minLength: 8)
+                Image(systemName: "chevron.right").font(.footnote.weight(.bold)).foregroundStyle(muted)
+            }
+            .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
+            .padding(16)
+            .background(panel, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
+            .overlay(RoundedRectangle(cornerRadius: 20, style: .continuous).stroke(accent.opacity(0.35), lineWidth: 1))
+        }
+        .buttonStyle(.plain)
+        .accessibilityHint("Åpner samtalen med assistenten i CadSHAPE")
+    }
 
     /// The camera screen, straight in the chosen mode (no mode picker there).
     private func measure(_ mode: MeasureMode) {
